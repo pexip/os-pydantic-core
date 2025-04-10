@@ -1,0 +1,27 @@
+#!/usr/bin/make -f
+
+include /usr/share/dpkg/default.mk
+include /usr/share/rustc/architecture.mk
+export DEB_HOST_RUST_TYPE
+
+export PATH := /usr/share/cargo/bin:$(PATH)
+export CARGO_HOME = $(CURDIR)/debian/cargo_home
+export DEB_CARGO_CRATE = $(DEB_SOURCE)_$(DEB_VERSION_UPSTREAM)
+export PYBUILD_NAME = pydantic-core
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@ --buildsystem=pybuild
+
+execute_before_dh_auto_clean:
+	test ! -f Cargo.lock.saved || mv Cargo.lock.saved Cargo.lock
+
+execute_before_dh_auto_configure:
+	cargo prepare-debian debian/cargo_registry --link-from-system
+
+execute_before_dh_auto_build:
+	mv Cargo.lock Cargo.lock.saved
+	cargo generate-lockfile --offline
+
+execute_after_dh_auto_install:
+	dh-cargo-built-using python3-pydantic-core

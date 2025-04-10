@@ -1,0 +1,63 @@
+pydantic-core (2.27.2-3) unstable; urgency=medium
+
+  * Add Breaks on python3-pydantic (<< 2.10.6-2~).
+
+ -- Colin Watson <cjwatson@debian.org>  Thu, 10 Apr 2025 09:28:10 +0100
+
+pydantic-core (2.27.2-2) unstable; urgency=medium
+
+  * Add myself to Uploaders.
+  * Drop patch to use idna 0.4.x.
+  * Adjust tests for url 2.5.4 (closes: #1101417).
+
+ -- Colin Watson <cjwatson@debian.org>  Sun, 06 Apr 2025 13:08:44 +0100
+
+pydantic-core (2.27.2-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release.
+
+ -- Colin Watson <cjwatson@debian.org>  Wed, 18 Dec 2024 23:11:09 +0000
+
+pydantic-core (2.27.1-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release.
+
+ -- Colin Watson <cjwatson@debian.org>  Sun, 24 Nov 2024 16:18:37 +0000
+
+pydantic-core (2.23.4-2) unstable; urgency=medium
+
+  * Team upload.
+  * Drop patch to use base64 0.21.x (closes: #1084322).
+
+ -- Colin Watson <cjwatson@debian.org>  Mon, 07 Oct 2024 10:39:46 +0100
+
+pydantic-core (2.23.4-1) unstable; urgency=medium
+
+  * Team upload.
+  * New upstream release.
+
+ -- Colin Watson <cjwatson@debian.org>  Tue, 17 Sep 2024 11:18:56 +0100
+
+pydantic-core (2.23.3-1) unstable; urgency=medium
+
+  * Team upload.
+  * Add Built-Using, X-Cargo-Built-Using, and Static-Built-Using fields
+    (closes: #1081538).
+  * Fix typo in DEB_BUILD_MAINT_OPTIONS hardening option.
+  * New upstream release.
+
+ -- Colin Watson <cjwatson@debian.org>  Fri, 13 Sep 2024 00:27:43 +0100
+
+pydantic-core (2.20.1-1) unstable; urgency=medium
+
+  * New upstream release (closes: #1073481).
+
+ -- Colin Watson <cjwatson@debian.org>  Sat, 07 Sep 2024 21:48:49 +0100
+
+pydantic-core (2.11.0-1) unstable; urgency=medium
+
+  * Initial release (Closes: #1052619)
+
+ -- Timo Röhling <roehling@debian.org>  Fri, 01 Mar 2024 11:26:55 +0100
