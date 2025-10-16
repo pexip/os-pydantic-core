@@ -1,8 +1,9 @@
 Source: pydantic-core
 Section: python
 Priority: optional
-Maintainer: Debian Python Team <team+python@tracker.debian.org>
-Uploaders:
+Maintainer: Pexip AS <packaging@pexip.com>
+XSBC-Pexip-Original-Maintainer: Debian Python Team <team+python@tracker.debian.org>
+XSBC-Pexip-Original-Uploaders:
  Timo Röhling <roehling@debian.org>,
  Michael Banck <mbanck@debian.org>,
  Colin Watson <cjwatson@debian.org>,
@@ -55,6 +56,7 @@ Description: Rust implementation of pydantic core functionality
  .
  The core library is implemented in Rust and up to seventeen times faster than
  the original pure Python implementation.
+XS-Pexip-Upstream: http://deb.debian.org/debian/ trixie
 
 Package: python3-pydantic-core
 Architecture: any
