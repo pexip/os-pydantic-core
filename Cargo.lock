@@ -307,7 +307,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "pyo3",
- "pyo3-build-config",
+ "pyo3-build-config 0.22.6",
  "smallvec",
 ]
 
@@ -435,7 +435,7 @@ dependencies = [
  "jiter",
  "num-bigint",
  "pyo3",
- "pyo3-build-config",
+ "pyo3-build-config 0.26.0",
  "python3-dll-a",
  "regex",
  "serde",
@@ -462,7 +462,7 @@ dependencies = [
  "num-bigint",
  "once_cell",
  "portable-atomic",
- "pyo3-build-config",
+ "pyo3-build-config 0.22.6",
  "pyo3-ffi",
  "pyo3-macros",
  "unindent",
@@ -476,7 +476,16 @@ checksum = "b14b5775b5ff446dd1056212d778012cbe8a0fbffd368029fd9e25b514479c38"
 dependencies = [
  "once_cell",
  "python3-dll-a",
- "target-lexicon",
+ "target-lexicon 0.12.14",
+]
+
+[[package]]
+name = "pyo3-build-config"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fc6ddaf24947d12a9aa31ac65431fb1b851b8f4365426e182901eabfb87df5f"
+dependencies = [
+ "target-lexicon 0.13.3",
 ]
 
 [[package]]
@@ -486,7 +495,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ab5bcf04a2cdcbb50c7d6105de943f543f9ed92af55818fd17b660390fc8636"
 dependencies = [
  "libc",
- "pyo3-build-config",
+ "pyo3-build-config 0.22.6",
 ]
 
 [[package]]
@@ -509,7 +518,7 @@ checksum = "36c011a03ba1e50152b4b394b479826cad97e7a21eb52df179cd91ac411cbfbe"
 dependencies = [
  "heck",
  "proc-macro2",
- "pyo3-build-config",
+ "pyo3-build-config 0.22.6",
  "quote",
  "syn",
 ]
@@ -695,6 +704,12 @@ name = "target-lexicon"
 version = "0.12.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1fc403891a21bcfb7c37834ba66a547a8f402146eba7265b5a6d88059c9ff2f"
+
+[[package]]
+name = "target-lexicon"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df7f62577c25e07834649fc3b39fafdc597c0a3527dc1c60129201ccfcbaa50c"
 
 [[package]]
 name = "tinystr"
