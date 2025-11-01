@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-20.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: install rust nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -77,7 +77,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: install rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -118,7 +118,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: install rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -149,7 +149,7 @@ jobs:
 
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: install uv
         uses: astral-sh/setup-uv@v3
@@ -194,7 +194,7 @@ jobs:
           - 'pypy3.10'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: install uv
         uses: astral-sh/setup-uv@v3
@@ -223,12 +223,12 @@ jobs:
     continue-on-error: true
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: pydantic/pydantic
           path: pydantic
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: pydantic-core
 
@@ -267,7 +267,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: install rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -304,7 +304,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: install rust nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -323,7 +323,7 @@ jobs:
   build-wasm-emscripten:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: install rust nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -389,7 +389,7 @@ jobs:
     name: build sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
@@ -480,7 +480,7 @@ jobs:
 
     runs-on: ${{ (matrix.os == 'linux' && 'ubuntu') || matrix.os }}-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: set up python
         uses: actions/setup-python@v5
@@ -540,7 +540,7 @@ jobs:
 
     runs-on: ${{ matrix.runs-on }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: install uv
         uses: astral-sh/setup-uv@v3
@@ -578,7 +578,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: get dist artifacts
         uses: actions/download-artifact@v4
@@ -619,7 +619,7 @@ jobs:
             distro: alpine_latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: get dist artifacts
         uses: actions/download-artifact@v4
@@ -665,7 +665,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: install uv
         uses: astral-sh/setup-uv@v3
@@ -689,7 +689,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: set up python
         uses: actions/setup-python@v5
