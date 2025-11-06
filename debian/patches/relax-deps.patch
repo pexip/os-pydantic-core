@@ -1,0 +1,37 @@
+From: =?utf-8?q?Timo_R=C3=B6hling?= <roehling@debian.org>
+Date: Thu, 22 Feb 2024 13:29:06 +0100
+Subject: Fudge rust crate version requirements
+
+Author: Colin Watson <cjwatson@debian.org>
+Forwarded: not-needed
+Last-Update: 2025-11-06
+---
+ Cargo.toml | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index a7e86ab..e6e787e 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -29,9 +29,9 @@ rust-version = "1.75"
+ # but needs a bit of work to make sure it's not used in the codebase
+ pyo3 = { version = "0.26", features = ["generate-import-lib", "num-bigint", "py-clone"] }
+ regex = "1.12.2"
+-strum = { version = "0.27", features = ["derive"] }
+-strum_macros = "0.27"
+-serde_json = { version = "1.0.145", features = ["arbitrary_precision"] }
++strum = { version = "0.26", features = ["derive"] }
++strum_macros = "0.26"
++serde_json = { version = "1.0.143", features = ["arbitrary_precision"] }
+ enum_dispatch = "0.3.13"
+ serde = { version = "1.0.219", features = ["derive"] }
+ speedate = "0.17.0"
+@@ -46,7 +46,7 @@ num-traits = "0.2.19"
+ uuid = "1.18.1"
+ jiter = { version = "0.11.1", features = ["python"] }
+ hex = "0.4.3"
+-percent-encoding = "2.3.2"
++percent-encoding = "2.3.1"
+ 
+ [lib]
+ name = "_pydantic_core"

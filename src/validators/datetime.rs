@@ -1,9 +1,11 @@
+use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::sync::GILOnceCell;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyString};
-use speedate::{DateTime, Time};
+use speedate::{DateTime, MicrosecondsPrecisionOverflowBehavior, Time};
 use std::cmp::Ordering;
+use std::sync::Arc;
 use strum::EnumMessage;
 
 use crate::build_tools::{is_strict, py_schema_error_type};
@@ -12,16 +14,17 @@ use crate::errors::ToErrorValue;
 use crate::errors::{py_err_string, ErrorType, ErrorTypeDefaults, ValError, ValResult};
 use crate::input::{EitherDateTime, Input};
 
-use crate::tools::SchemaDict;
-
 use super::Exactness;
 use super::{BuildValidator, CombinedValidator, DefinitionsBuilder, ValidationState, Validator};
+use crate::tools::SchemaDict;
+use crate::validators::config::TemporalUnitMode;
 
 #[derive(Debug, Clone)]
 pub struct DateTimeValidator {
     strict: bool,
     constraints: Option<DateTimeConstraints>,
     microseconds_precision: speedate::MicrosecondsPrecisionOverflowBehavior,
+    val_temporal_unit: TemporalUnitMode,
 }
 
 pub(crate) fn extract_microseconds_precision(
@@ -31,7 +34,7 @@ pub(crate) fn extract_microseconds_precision(
     schema_or_config_same(schema, config, intern!(schema.py(), "microseconds_precision"))?
         .map_or(
             Ok(speedate::MicrosecondsPrecisionOverflowBehavior::Truncate),
-            |v: Bound<'_, PyString>| speedate::MicrosecondsPrecisionOverflowBehavior::try_from(v.to_str().unwrap()),
+            |v: Bound<'_, PyString>| v.to_str().unwrap().parse(),
         )
         .map_err(|_| {
             py_schema_error_type!("Invalid `microseconds_precision`, must be one of \"truncate\" or \"error\"")
@@ -44,13 +47,14 @@ impl BuildValidator for DateTimeValidator {
     fn build(
         schema: &Bound<'_, PyDict>,
         config: Option<&Bound<'_, PyDict>>,
-        _definitions: &mut DefinitionsBuilder<CombinedValidator>,
-    ) -> PyResult<CombinedValidator> {
-        Ok(Self {
+        _definitions: &mut DefinitionsBuilder<Arc<CombinedValidator>>,
+    ) -> PyResult<Arc<CombinedValidator>> {
+        Ok(CombinedValidator::Datetime(Self {
             strict: is_strict(schema, config)?,
             constraints: DateTimeConstraints::from_py(schema)?,
             microseconds_precision: extract_microseconds_precision(schema, config)?,
-        }
+            val_temporal_unit: TemporalUnitMode::from_config(config)?,
+        })
         .into())
     }
 }
@@ -63,9 +67,9 @@ impl Validator for DateTimeValidator {
         py: Python<'py>,
         input: &(impl Input<'py> + ?Sized),
         state: &mut ValidationState<'_, 'py>,
-    ) -> ValResult<PyObject> {
+    ) -> ValResult<Py<PyAny>> {
         let strict = state.strict_or(self.strict);
-        let datetime = match input.validate_datetime(strict, self.microseconds_precision) {
+        let datetime = match input.validate_datetime(strict, self.microseconds_precision, self.val_temporal_unit) {
             Ok(val_match) => val_match.unpack(state),
             // if the error was a parsing error, in lax mode we allow dates and add the time 00:00:00
             Err(line_errors @ ValError::LineErrors(..)) if !strict => {
@@ -141,7 +145,7 @@ impl Validator for DateTimeValidator {
 /// In lax mode, if the input is not a datetime, we try parsing the input as a date and add the "00:00:00" time.
 /// Ok(None) means that this is not relevant to datetimes (the input was not a date nor a string)
 fn datetime_from_date<'py>(input: &(impl Input<'py> + ?Sized)) -> Result<Option<EitherDateTime<'py>>, ValError> {
-    let either_date = match input.validate_date(false) {
+    let either_date = match input.validate_date(false, TemporalUnitMode::default()) {
         Ok(val_match) => val_match.into_inner(),
         // if the error was a parsing error, update the error type from DateParsing to DatetimeFromDateParsing
         Err(ValError::LineErrors(mut line_errors)) => {
@@ -208,9 +212,18 @@ impl DateTimeConstraints {
     }
 }
 
-fn py_datetime_as_datetime(schema: &Bound<'_, PyDict>, field: &Bound<'_, PyString>) -> PyResult<Option<DateTime>> {
-    match schema.get_as(field)? {
-        Some(dt) => Ok(Some(EitherDateTime::Py(dt).as_raw()?)),
+fn py_datetime_as_datetime(schema: &Bound<'_, PyDict>, key: &Bound<'_, PyString>) -> PyResult<Option<DateTime>> {
+    match schema.get_item(key)? {
+        Some(value) => match value.validate_datetime(
+            false,
+            MicrosecondsPrecisionOverflowBehavior::Truncate,
+            TemporalUnitMode::default(),
+        ) {
+            Ok(v) => Ok(Some(v.into_inner().as_raw()?)),
+            Err(_) => Err(PyValueError::new_err(format!(
+                "'{key}' must be coercible to a datetime instance",
+            ))),
+        },
         None => Ok(None),
     }
 }
@@ -245,11 +258,7 @@ pub struct NowConstraint {
     utc_offset: Option<i32>,
 }
 
-static TIME_LOCALTIME: GILOnceCell<PyObject> = GILOnceCell::new();
-
-fn get_localtime(py: Python) -> PyResult<PyObject> {
-    Ok(py.import_bound("time")?.getattr("localtime")?.into_py(py))
-}
+static TIME_LOCALTIME: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 impl NowConstraint {
     /// Get the UTC offset in seconds either from the utc_offset field or by calling `time.localtime().tm_gmtoff`.
@@ -259,8 +268,8 @@ impl NowConstraint {
         if let Some(utc_offset) = self.utc_offset {
             Ok(utc_offset)
         } else {
-            let localtime = TIME_LOCALTIME.get_or_init(py, || get_localtime(py).unwrap());
-            localtime.bind(py).call0()?.getattr(intern!(py, "tm_gmtoff"))?.extract()
+            let localtime = TIME_LOCALTIME.import(py, "time", "localtime")?;
+            localtime.call0()?.getattr(intern!(py, "tm_gmtoff"))?.extract()
         }
     }
 
@@ -293,9 +302,8 @@ impl TZConstraint {
 
     pub(super) fn from_py(schema: &Bound<'_, PyDict>) -> PyResult<Option<Self>> {
         let py = schema.py();
-        let tz_constraint = match schema.get_item(intern!(py, "tz_constraint"))? {
-            Some(c) => c,
-            None => return Ok(None),
+        let Some(tz_constraint) = schema.get_item(intern!(py, "tz_constraint"))? else {
+            return Ok(None);
         };
         if let Ok(s) = tz_constraint.downcast::<PyString>() {
             let s = s.to_str()?;

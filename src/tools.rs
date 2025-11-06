@@ -4,24 +4,25 @@ use num_bigint::BigInt;
 
 use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyString};
+use pyo3::types::{PyDict, PyMapping, PyString};
 use pyo3::{intern, FromPyObject};
 
 use crate::input::Int;
-use jiter::{cached_py_string, pystring_fast_new, StringCacheMode};
+use crate::PydanticUndefinedType;
+use jiter::{cached_py_string, StringCacheMode};
 
 pub trait SchemaDict<'py> {
-    fn get_as<T>(&self, key: &Bound<'_, PyString>) -> PyResult<Option<T>>
+    fn get_as<T>(&self, key: &Bound<'py, PyString>) -> PyResult<Option<T>>
     where
         T: FromPyObject<'py>;
 
-    fn get_as_req<T>(&self, key: &Bound<'_, PyString>) -> PyResult<T>
+    fn get_as_req<T>(&self, key: &Bound<'py, PyString>) -> PyResult<T>
     where
         T: FromPyObject<'py>;
 }
 
 impl<'py> SchemaDict<'py> for Bound<'py, PyDict> {
-    fn get_as<T>(&self, key: &Bound<'_, PyString>) -> PyResult<Option<T>>
+    fn get_as<T>(&self, key: &Bound<'py, PyString>) -> PyResult<Option<T>>
     where
         T: FromPyObject<'py>,
     {
@@ -31,7 +32,7 @@ impl<'py> SchemaDict<'py> for Bound<'py, PyDict> {
         }
     }
 
-    fn get_as_req<T>(&self, key: &Bound<'_, PyString>) -> PyResult<T>
+    fn get_as_req<T>(&self, key: &Bound<'py, PyString>) -> PyResult<T>
     where
         T: FromPyObject<'py>,
     {
@@ -43,7 +44,7 @@ impl<'py> SchemaDict<'py> for Bound<'py, PyDict> {
 }
 
 impl<'py> SchemaDict<'py> for Option<&Bound<'py, PyDict>> {
-    fn get_as<T>(&self, key: &Bound<'_, PyString>) -> PyResult<Option<T>>
+    fn get_as<T>(&self, key: &Bound<'py, PyString>) -> PyResult<Option<T>>
     where
         T: FromPyObject<'py>,
     {
@@ -54,7 +55,7 @@ impl<'py> SchemaDict<'py> for Option<&Bound<'py, PyDict>> {
     }
 
     #[cfg_attr(has_coverage_attribute, coverage(off))]
-    fn get_as_req<T>(&self, key: &Bound<'_, PyString>) -> PyResult<T>
+    fn get_as_req<T>(&self, key: &Bound<'py, PyString>) -> PyResult<T>
     where
         T: FromPyObject<'py>,
     {
@@ -118,6 +119,7 @@ pub fn safe_repr<'py>(v: &Bound<'py, PyAny>) -> ReprOutput<'py> {
     }
 }
 
+// warning: this function can be incredibly slow, so use with caution
 pub fn truncate_safe_repr(v: &Bound<'_, PyAny>, max_len: Option<usize>) -> String {
     let max_len = max_len.unwrap_or(50); // default to 100 bytes
     let input_str = safe_repr(v);
@@ -128,14 +130,6 @@ pub fn truncate_safe_repr(v: &Bound<'_, PyAny>, max_len: Option<usize>) -> Strin
 }
 
 pub fn extract_i64(v: &Bound<'_, PyAny>) -> Option<i64> {
-    #[cfg(PyPy)]
-    if !v.is_instance_of::<pyo3::types::PyInt>() {
-        // PyPy used __int__ to cast floats to ints after CPython removed it,
-        // see https://github.com/pypy/pypy/issues/4949
-        //
-        // Can remove this after PyPy 7.3.17 is released
-        return None;
-    }
     v.extract().ok()
 }
 
@@ -147,11 +141,10 @@ pub fn extract_int(v: &Bound<'_, PyAny>) -> Option<Int> {
 
 pub(crate) fn new_py_string<'py>(py: Python<'py>, s: &str, cache_str: StringCacheMode) -> Bound<'py, PyString> {
     // we could use `bytecount::num_chars(s.as_bytes()) == s.len()` as orjson does, but it doesn't appear to be faster
-    let ascii_only = false;
     if matches!(cache_str, StringCacheMode::All) {
-        cached_py_string(py, s, ascii_only)
+        cached_py_string(py, s)
     } else {
-        pystring_fast_new(py, s, ascii_only)
+        PyString::new(py, s)
     }
 }
 
@@ -197,4 +190,15 @@ pub fn write_truncated_to_limited_bytes<F: fmt::Write>(f: &mut F, val: &str, max
     } else {
         write!(f, "{val}")
     }
+}
+
+/// Implementation of `mapping.get(key, PydanticUndefined)` which returns `None` if the key is not found
+pub fn mapping_get<'py>(
+    mapping: &Bound<'py, PyMapping>,
+    key: impl IntoPyObject<'py>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let undefined = PydanticUndefinedType::get(mapping.py());
+    mapping
+        .call_method1(intern!(mapping.py(), "get"), (key, undefined))
+        .map(|value| if value.is(undefined) { None } else { Some(value) })
 }

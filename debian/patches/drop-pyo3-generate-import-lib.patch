@@ -1,0 +1,25 @@
+From: Colin Watson <cjwatson@debian.org>
+Date: Wed, 20 Aug 2025 12:08:50 +0100
+Subject: Patch out pyo3 generate-import-lib feature
+
+It's only needed when building for Windows.
+
+Forwarded: not-needed
+Last-Update: 2025-11-06
+---
+ Cargo.toml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index e6e787e..bc3e291 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -27,7 +27,7 @@ rust-version = "1.75"
+ [dependencies]
+ # TODO it would be very nice to remove the "py-clone" feature as it can panic,
+ # but needs a bit of work to make sure it's not used in the codebase
+-pyo3 = { version = "0.26", features = ["generate-import-lib", "num-bigint", "py-clone"] }
++pyo3 = { version = "0.26", features = ["num-bigint", "py-clone"] }
+ regex = "1.12.2"
+ strum = { version = "0.26", features = ["derive"] }
+ strum_macros = "0.26"

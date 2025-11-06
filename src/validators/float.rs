@@ -1,8 +1,10 @@
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use pyo3::IntoPyObjectExt;
 
 use crate::build_tools::{is_strict, schema_or_config_same};
 use crate::errors::{ErrorType, ErrorTypeDefaults, ValError, ValResult};
@@ -18,8 +20,8 @@ impl BuildValidator for FloatBuilder {
     fn build(
         schema: &Bound<'_, PyDict>,
         config: Option<&Bound<'_, PyDict>>,
-        definitions: &mut DefinitionsBuilder<CombinedValidator>,
-    ) -> PyResult<CombinedValidator> {
+        definitions: &mut DefinitionsBuilder<Arc<CombinedValidator>>,
+    ) -> PyResult<Arc<CombinedValidator>> {
         let py = schema.py();
         let use_constrained = schema.get_item(intern!(py, "multiple_of"))?.is_some()
             || schema.get_item(intern!(py, "le"))?.is_some()
@@ -29,10 +31,10 @@ impl BuildValidator for FloatBuilder {
         if use_constrained {
             ConstrainedFloatValidator::build(schema, config, definitions)
         } else {
-            Ok(FloatValidator {
+            Ok(CombinedValidator::Float(FloatValidator {
                 strict: is_strict(schema, config)?,
                 allow_inf_nan: schema_or_config_same(schema, config, intern!(py, "allow_inf_nan"))?.unwrap_or(true),
-            }
+            })
             .into())
         }
     }
@@ -50,13 +52,13 @@ impl BuildValidator for FloatValidator {
     fn build(
         schema: &Bound<'_, PyDict>,
         config: Option<&Bound<'_, PyDict>>,
-        _definitions: &mut DefinitionsBuilder<CombinedValidator>,
-    ) -> PyResult<CombinedValidator> {
+        _definitions: &mut DefinitionsBuilder<Arc<CombinedValidator>>,
+    ) -> PyResult<Arc<CombinedValidator>> {
         let py = schema.py();
-        Ok(Self {
+        Ok(CombinedValidator::Float(Self {
             strict: is_strict(schema, config)?,
             allow_inf_nan: schema_or_config_same(schema, config, intern!(py, "allow_inf_nan"))?.unwrap_or(true),
-        }
+        })
         .into())
     }
 }
@@ -69,12 +71,12 @@ impl Validator for FloatValidator {
         py: Python<'py>,
         input: &(impl Input<'py> + ?Sized),
         state: &mut ValidationState<'_, 'py>,
-    ) -> ValResult<PyObject> {
+    ) -> ValResult<Py<PyAny>> {
         let either_float = input.validate_float(state.strict_or(self.strict))?.unpack(state);
         if !self.allow_inf_nan && !either_float.as_f64().is_finite() {
             return Err(ValError::new(ErrorTypeDefaults::FiniteNumber, input));
         }
-        Ok(either_float.into_py(py))
+        Ok(either_float.into_py_any(py)?)
     }
 
     fn get_name(&self) -> &str {
@@ -101,16 +103,17 @@ impl Validator for ConstrainedFloatValidator {
         py: Python<'py>,
         input: &(impl Input<'py> + ?Sized),
         state: &mut ValidationState<'_, 'py>,
-    ) -> ValResult<PyObject> {
+    ) -> ValResult<Py<PyAny>> {
         let either_float = input.validate_float(state.strict_or(self.strict))?.unpack(state);
         let float: f64 = either_float.as_f64();
         if !self.allow_inf_nan && !float.is_finite() {
             return Err(ValError::new(ErrorTypeDefaults::FiniteNumber, input));
         }
         if let Some(multiple_of) = self.multiple_of {
-            let rem = float % multiple_of;
-            let threshold = float.abs() / 1e9;
-            if rem.abs() > threshold && (rem - multiple_of).abs() > threshold {
+            let tolerance = 1e-9;
+            let rounded_div = (float / multiple_of).round();
+            let diff = (float - (rounded_div * multiple_of)).abs();
+            if diff > tolerance {
                 return Err(ValError::new(
                     ErrorType::MultipleOf {
                         multiple_of: multiple_of.into(),
@@ -164,10 +167,10 @@ impl Validator for ConstrainedFloatValidator {
                 ));
             }
         }
-        Ok(either_float.into_py(py))
+        Ok(either_float.into_py_any(py)?)
     }
 
-    fn get_name(&self) -> &str {
+    fn get_name(&self) -> &'static str {
         "constrained-float"
     }
 }
@@ -177,10 +180,10 @@ impl BuildValidator for ConstrainedFloatValidator {
     fn build(
         schema: &Bound<'_, PyDict>,
         config: Option<&Bound<'_, PyDict>>,
-        _definitions: &mut DefinitionsBuilder<CombinedValidator>,
-    ) -> PyResult<CombinedValidator> {
+        _definitions: &mut DefinitionsBuilder<Arc<CombinedValidator>>,
+    ) -> PyResult<Arc<CombinedValidator>> {
         let py = schema.py();
-        Ok(Self {
+        Ok(CombinedValidator::ConstrainedFloat(Self {
             strict: is_strict(schema, config)?,
             allow_inf_nan: schema_or_config_same(schema, config, intern!(py, "allow_inf_nan"))?.unwrap_or(true),
             multiple_of: schema.get_as(intern!(py, "multiple_of"))?,
@@ -188,7 +191,7 @@ impl BuildValidator for ConstrainedFloatValidator {
             lt: schema.get_as(intern!(py, "lt"))?,
             ge: schema.get_as(intern!(py, "ge"))?,
             gt: schema.get_as(intern!(py, "gt"))?,
-        }
+        })
         .into())
     }
 }
