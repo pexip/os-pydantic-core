@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use pyo3::IntoPyObjectExt;
 
 use crate::build_tools::is_strict;
 use crate::errors::{ErrorType, ValError, ValResult};
@@ -23,18 +26,18 @@ impl BuildValidator for BytesValidator {
     fn build(
         schema: &Bound<'_, PyDict>,
         config: Option<&Bound<'_, PyDict>>,
-        _definitions: &mut DefinitionsBuilder<CombinedValidator>,
-    ) -> PyResult<CombinedValidator> {
+        _definitions: &mut DefinitionsBuilder<Arc<CombinedValidator>>,
+    ) -> PyResult<Arc<CombinedValidator>> {
         let py = schema.py();
         let use_constrained = schema.get_item(intern!(py, "max_length"))?.is_some()
             || schema.get_item(intern!(py, "min_length"))?.is_some();
         if use_constrained {
             BytesConstrainedValidator::build(schema, config)
         } else {
-            Ok(Self {
+            Ok(CombinedValidator::Bytes(Self {
                 strict: is_strict(schema, config)?,
                 bytes_mode: ValBytesMode::from_config(config)?,
-            }
+            })
             .into())
         }
     }
@@ -48,10 +51,10 @@ impl Validator for BytesValidator {
         py: Python<'py>,
         input: &(impl Input<'py> + ?Sized),
         state: &mut ValidationState<'_, 'py>,
-    ) -> ValResult<PyObject> {
+    ) -> ValResult<Py<PyAny>> {
         input
             .validate_bytes(state.strict_or(self.strict), self.bytes_mode)
-            .map(|m| m.unpack(state).into_py(py))
+            .and_then(|m| Ok(m.unpack(state).into_py_any(py)?))
     }
 
     fn get_name(&self) -> &str {
@@ -75,7 +78,7 @@ impl Validator for BytesConstrainedValidator {
         py: Python<'py>,
         input: &(impl Input<'py> + ?Sized),
         state: &mut ValidationState<'_, 'py>,
-    ) -> ValResult<PyObject> {
+    ) -> ValResult<Py<PyAny>> {
         let either_bytes = input
             .validate_bytes(state.strict_or(self.strict), self.bytes_mode)?
             .unpack(state);
@@ -103,23 +106,23 @@ impl Validator for BytesConstrainedValidator {
                 ));
             }
         }
-        Ok(either_bytes.into_py(py))
+        Ok(either_bytes.into_py_any(py)?)
     }
 
-    fn get_name(&self) -> &str {
+    fn get_name(&self) -> &'static str {
         "constrained-bytes"
     }
 }
 
 impl BytesConstrainedValidator {
-    fn build(schema: &Bound<'_, PyDict>, config: Option<&Bound<'_, PyDict>>) -> PyResult<CombinedValidator> {
+    fn build(schema: &Bound<'_, PyDict>, config: Option<&Bound<'_, PyDict>>) -> PyResult<Arc<CombinedValidator>> {
         let py = schema.py();
-        Ok(Self {
+        Ok(CombinedValidator::ConstrainedBytes(Self {
             strict: is_strict(schema, config)?,
             bytes_mode: ValBytesMode::from_config(config)?,
             min_length: schema.get_as(intern!(py, "min_length"))?,
             max_length: schema.get_as(intern!(py, "max_length"))?,
-        }
+        })
         .into())
     }
 }

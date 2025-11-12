@@ -1,2 +1,2 @@
-0001-Fudge-rust-crate-version-requirements.patch
-url-2.5.4.patch
+relax-deps.patch
+drop-pyo3-generate-import-lib.patch

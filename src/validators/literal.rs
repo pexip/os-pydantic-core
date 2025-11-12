@@ -1,6 +1,8 @@
 // Validator for things inside of a typing.Literal[]
 // which can be an int, a string, bytes or an Enum value (including `class Foo(str, Enum)` type enums)
 use core::fmt::Debug;
+use std::cell::OnceCell;
+use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyInt, PyList};
@@ -48,9 +50,9 @@ impl<T: Debug> LiteralLookup<T> {
         let mut expected_bool = BoolLiteral::default();
         let mut expected_int = AHashMap::new();
         let mut expected_str: AHashMap<String, usize> = AHashMap::new();
-        let expected_py_dict = PyDict::new_bound(py);
+        let expected_py_dict = PyDict::new(py);
         let mut expected_py_values = Vec::new();
-        let expected_py_primitives = PyDict::new_bound(py);
+        let expected_py_primitives = PyDict::new(py);
         let mut values = Vec::new();
         for (k, v) in expected {
             let id = values.len();
@@ -139,38 +141,46 @@ impl<T: Debug> LiteralLookup<T> {
             }
         }
         // cache py_input if needed, since we might need it for multiple lookups
-        let mut py_input = None;
+        let py_input = OnceCell::new();
+        let get_py_input = || match py_input.get() {
+            Some(py_input) => PyResult::<_>::Ok(py_input),
+            None => {
+                let _ = py_input.set(input.to_object(py)?);
+                Ok(py_input.get().unwrap())
+            }
+        };
+
         if let Some(expected_py_dict) = &self.expected_py_dict {
-            let py_input = py_input.get_or_insert_with(|| input.to_object(py));
+            let py_input = get_py_input()?;
             // We don't use ? to unpack the result of `get_item` in the next line because unhashable
             // inputs will produce a TypeError, which in this case we just want to treat equivalently
             // to a failed lookup
-            if let Ok(Some(v)) = expected_py_dict.bind(py).get_item(&*py_input) {
+            if let Ok(Some(v)) = expected_py_dict.bind(py).get_item(py_input) {
                 let id: usize = v.extract().unwrap();
                 return Ok(Some((input, &self.values[id])));
             }
-        };
+        }
         if let Some(expected_py_values) = &self.expected_py_values {
-            let py_input = py_input.get_or_insert_with(|| input.to_object(py));
+            let py_input = get_py_input()?;
             for (k, id) in expected_py_values {
-                if k.bind(py).eq(&*py_input).unwrap_or(false) {
+                if k.bind(py).eq(py_input).unwrap_or(false) {
                     return Ok(Some((input, &self.values[*id])));
                 }
             }
-        };
+        }
 
         // this one must be last to avoid conflicts with the other lookups, think of this
         // almost as a lax fallback
         if let Some(expected_py_primitives) = &self.expected_py_primitives {
-            let py_input = py_input.get_or_insert_with(|| input.to_object(py));
+            let py_input = get_py_input()?;
             // We don't use ? to unpack the result of `get_item` in the next line because unhashable
             // inputs will produce a TypeError, which in this case we just want to treat equivalently
             // to a failed lookup
-            if let Ok(Some(v)) = expected_py_primitives.bind(py).get_item(&*py_input) {
+            if let Ok(Some(v)) = expected_py_primitives.bind(py).get_item(py_input) {
                 let id: usize = v.extract().unwrap();
                 return Ok(Some((input, &self.values[id])));
             }
-        };
+        }
         Ok(None)
     }
 
@@ -215,8 +225,7 @@ impl<T: Debug> LiteralLookup<T> {
         if let Some(expected_py) = &self.expected_py_dict {
             if let Ok(either_float) = input.validate_float(strict) {
                 let f = either_float.into_inner().as_f64();
-                let py_float = f.to_object(py);
-                if let Ok(Some(v)) = expected_py.bind(py).get_item(py_float.bind(py)) {
+                if let Ok(Some(v)) = expected_py.bind(py).get_item(f) {
                     let id: usize = v.extract().unwrap();
                     return Ok(Some(&self.values[id]));
                 }
@@ -236,7 +245,7 @@ impl<T: PyGcTraverse + Debug> PyGcTraverse for LiteralLookup<T> {
 
 #[derive(Debug, Clone)]
 pub struct LiteralValidator {
-    lookup: LiteralLookup<PyObject>,
+    lookup: LiteralLookup<Py<PyAny>>,
     expected_repr: String,
     name: String,
 }
@@ -247,8 +256,8 @@ impl BuildValidator for LiteralValidator {
     fn build(
         schema: &Bound<'_, PyDict>,
         _config: Option<&Bound<'_, PyDict>>,
-        _definitions: &mut DefinitionsBuilder<CombinedValidator>,
-    ) -> PyResult<CombinedValidator> {
+        _definitions: &mut DefinitionsBuilder<Arc<CombinedValidator>>,
+    ) -> PyResult<Arc<CombinedValidator>> {
         let expected: Bound<PyList> = schema.get_as_req(intern!(schema.py(), "expected"))?;
         if expected.is_empty() {
             return py_schema_err!("`expected` should have length > 0");
@@ -264,7 +273,8 @@ impl BuildValidator for LiteralValidator {
             lookup,
             expected_repr,
             name,
-        }))
+        })
+        .into())
     }
 }
 
@@ -276,7 +286,7 @@ impl Validator for LiteralValidator {
         py: Python<'py>,
         input: &(impl Input<'py> + ?Sized),
         _state: &mut ValidationState<'_, 'py>,
-    ) -> ValResult<PyObject> {
+    ) -> ValResult<Py<PyAny>> {
         match self.lookup.validate(py, input)? {
             Some((_, v)) => Ok(v.clone()),
             None => Err(ValError::new(

@@ -1,7 +1,9 @@
-use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use std::sync::Arc;
 
-use crate::build_tools::is_strict;
+use pyo3::types::PyDict;
+use pyo3::{prelude::*, IntoPyObjectExt};
+
+use crate::build_tools::{is_strict, LazyLock};
 use crate::errors::ValResult;
 use crate::input::Input;
 
@@ -12,18 +14,25 @@ pub struct BoolValidator {
     strict: bool,
 }
 
+static STRICT_BOOL_VALIDATOR: LazyLock<Arc<CombinedValidator>> =
+    LazyLock::new(|| Arc::new(BoolValidator { strict: true }.into()));
+
+static LAX_BOOL_VALIDATOR: LazyLock<Arc<CombinedValidator>> =
+    LazyLock::new(|| Arc::new(BoolValidator { strict: false }.into()));
+
 impl BuildValidator for BoolValidator {
     const EXPECTED_TYPE: &'static str = "bool";
 
     fn build(
         schema: &Bound<'_, PyDict>,
         config: Option<&Bound<'_, PyDict>>,
-        _definitions: &mut DefinitionsBuilder<CombinedValidator>,
-    ) -> PyResult<CombinedValidator> {
-        Ok(Self {
-            strict: is_strict(schema, config)?,
+        _definitions: &mut DefinitionsBuilder<Arc<CombinedValidator>>,
+    ) -> PyResult<Arc<CombinedValidator>> {
+        if is_strict(schema, config)? {
+            Ok(STRICT_BOOL_VALIDATOR.clone())
+        } else {
+            Ok(LAX_BOOL_VALIDATOR.clone())
         }
-        .into())
     }
 }
 
@@ -35,12 +44,12 @@ impl Validator for BoolValidator {
         py: Python<'py>,
         input: &(impl Input<'py> + ?Sized),
         state: &mut ValidationState<'_, 'py>,
-    ) -> ValResult<PyObject> {
+    ) -> ValResult<Py<PyAny>> {
         // TODO in theory this could be quicker if we used PyBool rather than going to a bool
         // and back again, might be worth profiling?
         input
             .validate_bool(state.strict_or(self.strict))
-            .map(|val_match| val_match.unpack(state).into_py(py))
+            .and_then(|val_match| Ok(val_match.unpack(state).into_py_any(py)?))
     }
 
     fn get_name(&self) -> &str {

@@ -3,6 +3,7 @@ use std::str::from_utf8;
 use pyo3::intern;
 use pyo3::prelude::*;
 
+use pyo3::sync::PyOnceLock;
 use pyo3::types::PyType;
 use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyComplex, PyDate, PyDateTime, PyDict, PyFloat, PyFrozenSet, PyInt, PyIterator,
@@ -18,6 +19,7 @@ use crate::tools::{extract_i64, safe_repr};
 use crate::validators::complex::string_to_complex;
 use crate::validators::decimal::{create_decimal, get_decimal_type};
 use crate::validators::Exactness;
+use crate::validators::TemporalUnitMode;
 use crate::validators::ValBytesMode;
 use crate::ArgsKwargs;
 
@@ -30,7 +32,8 @@ use super::input_abstract::ValMatch;
 use super::return_enums::EitherComplex;
 use super::return_enums::{iterate_attributes, iterate_mapping_items, ValidationMatch};
 use super::shared::{
-    decimal_as_int, float_as_int, get_enum_meta_object, int_as_bool, str_as_bool, str_as_float, str_as_int,
+    decimal_as_int, float_as_int, fraction_as_int, get_enum_meta_object, int_as_bool, str_as_bool, str_as_float,
+    str_as_int,
 };
 use super::Arguments;
 use super::ConsumeIterator;
@@ -44,6 +47,20 @@ use super::{
     py_string_str, BorrowInput, EitherBytes, EitherFloat, EitherInt, EitherString, EitherTimedelta, GenericIterator,
     Input,
 };
+
+static FRACTION_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+
+pub fn get_fraction_type(py: Python<'_>) -> &Bound<'_, PyType> {
+    FRACTION_TYPE
+        .get_or_init(py, || {
+            py.import("fractions")
+                .and_then(|fractions_module| fractions_module.getattr("Fraction"))
+                .unwrap()
+                .extract()
+                .unwrap()
+        })
+        .bind(py)
+}
 
 pub(crate) fn downcast_python_input<'py, T: PyTypeCheck>(input: &(impl Input<'py> + ?Sized)) -> Option<&Bound<'py, T>> {
     input.as_python().and_then(|any| any.downcast::<T>().ok())
@@ -75,6 +92,11 @@ impl From<Bound<'_, PyAny>> for LocItem {
 }
 
 impl<'py> Input<'py> for Bound<'py, PyAny> {
+    #[inline]
+    fn py_converter(&self) -> impl IntoPyObject<'py> + '_ {
+        self
+    }
+
     fn as_error_value(&self) -> InputValue {
         InputValue::Python(self.clone().into())
     }
@@ -87,10 +109,8 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
         Some(self)
     }
 
-    fn as_kwargs(&self, py: Python<'py>) -> Option<Bound<'py, PyDict>> {
-        self.downcast::<PyDict>()
-            .ok()
-            .map(|dict| dict.to_owned().unbind().into_bound(py))
+    fn as_kwargs(&self, _py: Python<'py>) -> Option<Bound<'py, PyDict>> {
+        self.downcast::<PyDict>().ok().map(Bound::to_owned)
     }
 
     type Arguments<'a>
@@ -109,6 +129,16 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
             Ok(PyArgs::new(Some(tuple.clone()), None))
         } else if let Ok(list) = self.downcast::<PyList>() {
             Ok(PyArgs::new(Some(list.to_tuple()), None))
+        } else {
+            Err(ValError::new(ErrorTypeDefaults::ArgumentsType, self))
+        }
+    }
+
+    fn validate_args_v3(&self) -> ValResult<PyArgs<'py>> {
+        if let Ok(args_kwargs) = self.extract::<ArgsKwargs>() {
+            let args = args_kwargs.args.into_bound(self.py());
+            let kwargs = args_kwargs.kwargs.map(|d| d.into_bound(self.py()));
+            Ok(PyArgs::new(Some(args), kwargs))
         } else {
             Err(ValError::new(ErrorTypeDefaults::ArgumentsType, self))
         }
@@ -133,7 +163,11 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
         }
     }
 
-    fn validate_str(&self, strict: bool, coerce_numbers_to_str: bool) -> ValResult<ValidationMatch<EitherString<'_>>> {
+    fn validate_str(
+        &self,
+        strict: bool,
+        coerce_numbers_to_str: bool,
+    ) -> ValResult<ValidationMatch<EitherString<'_, 'py>>> {
         if let Ok(py_str) = self.downcast_exact::<PyString>() {
             return Ok(ValidationMatch::exact(py_str.clone().into()));
         } else if let Ok(py_str) = self.downcast::<PyString>() {
@@ -256,6 +290,8 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
                     float_as_int(self, self.extract::<f64>()?)
                 } else if let Ok(decimal) = self.validate_decimal(true, self.py()) {
                     decimal_as_int(self, &decimal.into_inner())
+                } else if self.is_instance(get_fraction_type(self.py()))? {
+                    fraction_as_int(self)
                 } else if let Ok(float) = self.extract::<f64>() {
                     float_as_int(self, float)
                 } else if let Some(enum_val) = maybe_as_enum(self) {
@@ -278,7 +314,7 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
         }
     }
 
-    fn exact_str(&self) -> ValResult<EitherString<'_>> {
+    fn exact_str(&self) -> ValResult<EitherString<'_, 'py>> {
         if let Ok(py_str) = self.downcast_exact() {
             Ok(EitherString::Py(py_str.clone()))
         } else {
@@ -359,15 +395,17 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
         Self: 'a;
 
     fn strict_dict<'a>(&'a self) -> ValResult<GenericPyMapping<'a, 'py>> {
-        if let Ok(dict) = self.downcast::<PyDict>() {
+        if let Ok(dict) = self.downcast_exact::<PyDict>() {
             Ok(GenericPyMapping::Dict(dict))
+        } else if self.is_instance_of::<PyDict>() {
+            Ok(GenericPyMapping::Mapping(self.downcast::<PyMapping>()?))
         } else {
             Err(ValError::new(ErrorTypeDefaults::DictType, self))
         }
     }
 
     fn lax_dict<'a>(&'a self) -> ValResult<GenericPyMapping<'a, 'py>> {
-        if let Ok(dict) = self.downcast::<PyDict>() {
+        if let Ok(dict) = self.downcast_exact::<PyDict>() {
             Ok(GenericPyMapping::Dict(dict))
         } else if let Ok(mapping) = self.downcast::<PyMapping>() {
             Ok(GenericPyMapping::Mapping(mapping))
@@ -474,14 +512,14 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
     }
 
     fn validate_iter(&self) -> ValResult<GenericIterator<'static>> {
-        if self.iter().is_ok() {
+        if self.try_iter().is_ok() {
             Ok(self.into())
         } else {
             Err(ValError::new(ErrorTypeDefaults::IterableType, self))
         }
     }
 
-    fn validate_date(&self, strict: bool) -> ValResult<ValidationMatch<EitherDate<'py>>> {
+    fn validate_date(&self, strict: bool, mode: TemporalUnitMode) -> ValResult<ValidationMatch<EitherDate<'py>>> {
         if let Ok(date) = self.downcast_exact::<PyDate>() {
             Ok(ValidationMatch::exact(date.clone().into()))
         } else if self.is_instance_of::<PyDateTime>() {
@@ -502,7 +540,7 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
                 None
             }
         } {
-            bytes_as_date(self, bytes).map(ValidationMatch::lax)
+            bytes_as_date(self, bytes, mode).map(ValidationMatch::lax)
         } else {
             Err(ValError::new(ErrorTypeDefaults::DateType, self))
         }
@@ -546,6 +584,7 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
         &self,
         strict: bool,
         microseconds_overflow_behavior: MicrosecondsPrecisionOverflowBehavior,
+        mode: TemporalUnitMode,
     ) -> ValResult<ValidationMatch<EitherDateTime<'py>>> {
         if let Ok(dt) = self.downcast_exact::<PyDateTime>() {
             return Ok(ValidationMatch::exact(dt.clone().into()));
@@ -557,15 +596,15 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
             if !strict {
                 return if let Ok(py_str) = self.downcast::<PyString>() {
                     let str = py_string_str(py_str)?;
-                    bytes_as_datetime(self, str.as_bytes(), microseconds_overflow_behavior)
+                    bytes_as_datetime(self, str.as_bytes(), microseconds_overflow_behavior, mode)
                 } else if let Ok(py_bytes) = self.downcast::<PyBytes>() {
-                    bytes_as_datetime(self, py_bytes.as_bytes(), microseconds_overflow_behavior)
+                    bytes_as_datetime(self, py_bytes.as_bytes(), microseconds_overflow_behavior, mode)
                 } else if self.is_exact_instance_of::<PyBool>() {
                     Err(ValError::new(ErrorTypeDefaults::DatetimeType, self))
                 } else if let Some(int) = extract_i64(self) {
-                    int_as_datetime(self, int, 0)
+                    int_as_datetime(self, int, 0, mode)
                 } else if let Ok(float) = self.extract::<f64>() {
-                    float_as_datetime(self, float)
+                    float_as_datetime(self, float, mode)
                 } else if let Ok(date) = self.downcast::<PyDate>() {
                     Ok(date_as_datetime(date)?)
                 } else {
@@ -620,7 +659,7 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
         if strict {
             return Err(ValError::new(
                 ErrorType::IsInstanceOf {
-                    class: PyComplex::type_object_bound(py)
+                    class: PyComplex::type_object(py)
                         .qualname()
                         .and_then(|name| name.extract())
                         .unwrap_or_else(|_| "complex".to_owned()),
@@ -794,7 +833,7 @@ impl<'py> KeywordArgs<'py> for PyKwargs<'py> {
         &self,
         key: &'k crate::lookup_key::LookupKey,
     ) -> ValResult<Option<(&'k crate::lookup_key::LookupPath, Self::Item<'_>)>> {
-        key.py_get_dict_item(&self.0)
+        key.py_get_dict_item(&self.0).map_err(Into::into)
     }
 
     fn iter(&self) -> impl Iterator<Item = ValResult<(Self::Key<'_>, Self::Item<'_>)>> {
@@ -825,8 +864,8 @@ impl<'py> ValidatedDict<'py> for GenericPyMapping<'_, 'py> {
         key: &'k crate::lookup_key::LookupKey,
     ) -> ValResult<Option<(&'k crate::lookup_key::LookupPath, Self::Item<'_>)>> {
         match self {
-            Self::Dict(dict) => key.py_get_dict_item(dict),
-            Self::Mapping(mapping) => key.py_get_mapping_item(mapping),
+            Self::Dict(dict) => key.py_get_dict_item(dict).map_err(Into::into),
+            Self::Mapping(mapping) => key.py_get_mapping_item(mapping).map_err(Into::into),
             Self::GetAttr(obj, dict) => key.py_get_attr(obj, dict.as_ref()),
         }
     }
@@ -853,7 +892,7 @@ impl<'py> ValidatedDict<'py> for GenericPyMapping<'_, 'py> {
             Self::Mapping(mapping) => mapping
                 .call_method0(intern!(mapping.py(), "keys"))
                 .ok()?
-                .iter()
+                .try_iter()
                 .ok()?
                 .last()?
                 .ok(),
@@ -893,7 +932,7 @@ fn extract_sequence_iterable<'a, 'py>(obj: &'a Bound<'py, PyAny>) -> ValResult<P
             || obj.is_instance_of::<PyDict>()
             || obj.downcast::<PyMapping>().is_ok())
         {
-            if let Ok(iter) = obj.iter() {
+            if let Ok(iter) = obj.try_iter() {
                 return Ok(PySequenceIterable::Iterator(iter));
             }
         }
@@ -912,7 +951,15 @@ impl<'py> PySequenceIterable<'_, 'py> {
             PySequenceIterable::Iterator(iter) => iter.len().ok(),
         }
     }
-
+    fn generic_try_for_each(self, f: impl FnMut(PyResult<Bound<'py, PyAny>>) -> ValResult<()>) -> ValResult<()> {
+        match self {
+            PySequenceIterable::List(iter) => iter.iter().map(Ok).try_for_each(f),
+            PySequenceIterable::Tuple(iter) => iter.iter().map(Ok).try_for_each(f),
+            PySequenceIterable::Set(iter) => iter.iter().map(Ok).try_for_each(f),
+            PySequenceIterable::FrozenSet(iter) => iter.iter().map(Ok).try_for_each(f),
+            PySequenceIterable::Iterator(mut iter) => iter.try_for_each(f),
+        }
+    }
     fn generic_iterate<R>(
         self,
         consumer: impl ConsumeIterator<PyResult<Bound<'py, PyAny>>, Output = R>,
@@ -922,7 +969,7 @@ impl<'py> PySequenceIterable<'_, 'py> {
             PySequenceIterable::Tuple(iter) => Ok(consumer.consume_iterator(iter.iter().map(Ok))),
             PySequenceIterable::Set(iter) => Ok(consumer.consume_iterator(iter.iter().map(Ok))),
             PySequenceIterable::FrozenSet(iter) => Ok(consumer.consume_iterator(iter.iter().map(Ok))),
-            PySequenceIterable::Iterator(iter) => Ok(consumer.consume_iterator(iter.iter()?)),
+            PySequenceIterable::Iterator(iter) => Ok(consumer.consume_iterator(iter.try_iter()?)),
         }
     }
 }
@@ -947,6 +994,9 @@ impl<'py> ValidatedTuple<'py> for PySequenceIterable<'_, 'py> {
     type Item = Bound<'py, PyAny>;
     fn len(&self) -> Option<usize> {
         self.generic_len()
+    }
+    fn try_for_each(self, f: impl FnMut(PyResult<Self::Item>) -> ValResult<()>) -> ValResult<()> {
+        self.generic_try_for_each(f)
     }
     fn iterate<R>(self, consumer: impl ConsumeIterator<PyResult<Self::Item>, Output = R>) -> ValResult<R> {
         self.generic_iterate(consumer)

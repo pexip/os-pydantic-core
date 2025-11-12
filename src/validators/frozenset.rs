@@ -1,5 +1,7 @@
-use pyo3::prelude::*;
+use std::sync::Arc;
+
 use pyo3::types::{PyDict, PyFrozenSet};
+use pyo3::{prelude::*, IntoPyObjectExt};
 
 use crate::errors::ValResult;
 use crate::input::{validate_iter_to_set, BorrowInput, ConsumeIterator, Input, ValidatedSet};
@@ -13,7 +15,7 @@ use super::{BuildValidator, CombinedValidator, DefinitionsBuilder, Validator};
 #[derive(Debug)]
 pub struct FrozenSetValidator {
     strict: bool,
-    item_validator: Box<CombinedValidator>,
+    item_validator: Arc<CombinedValidator>,
     min_length: Option<usize>,
     max_length: Option<usize>,
     name: String,
@@ -33,9 +35,9 @@ impl Validator for FrozenSetValidator {
         py: Python<'py>,
         input: &(impl Input<'py> + ?Sized),
         state: &mut ValidationState<'_, 'py>,
-    ) -> ValResult<PyObject> {
+    ) -> ValResult<Py<PyAny>> {
         let collection = input.validate_frozenset(state.strict_or(self.strict))?.unpack(state);
-        let f_set = PyFrozenSet::empty_bound(py)?;
+        let f_set = PyFrozenSet::empty(py)?;
         collection.iterate(ValidateToFrozenSet {
             py,
             input,
@@ -46,7 +48,7 @@ impl Validator for FrozenSetValidator {
             fail_fast: self.fail_fast,
         })??;
         min_length_check!(input, "Frozenset", self.min_length, f_set);
-        Ok(f_set.into_py(py))
+        Ok(f_set.into_py_any(py)?)
     }
 
     fn get_name(&self) -> &str {
