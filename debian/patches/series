@@ -1,2 +1,3 @@
 relax-deps.patch
 drop-pyo3-generate-import-lib.patch
+pexip-downgrade-deps.patch
