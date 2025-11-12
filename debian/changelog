@@ -1,6 +1,7 @@
 pydantic-core (2.41.5-1+pexip25u1) pexip-trixie; urgency=medium
 
   * New upstream release
+  * Downgrade deps
 
  -- Huw Jones <huw@pexip.com>  Wed, 12 Nov 2025 16:15:30 +0000
 
