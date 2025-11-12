@@ -56,7 +56,7 @@ Description: Rust implementation of pydantic core functionality
  .
  The core library is implemented in Rust and up to seventeen times faster than
  the original pure Python implementation.
-XS-Pexip-Upstream: http://deb.debian.org/debian/ trixie
+XS-Pexip-Upstream: http://deb.debian.org/debian/ forky
 
 Package: python3-pydantic-core
 Architecture: any
