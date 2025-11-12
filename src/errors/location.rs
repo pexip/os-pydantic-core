@@ -1,5 +1,5 @@
 use pyo3::exceptions::PyTypeError;
-use pyo3::sync::GILOnceCell;
+use pyo3::sync::PyOnceLock;
 use std::borrow::Cow;
 use std::fmt;
 
@@ -8,11 +8,9 @@ use pyo3::types::{PyList, PyTuple};
 use serde::ser::SerializeSeq;
 use serde::{Serialize, Serializer};
 
-use crate::lookup_key::{LookupPath, PathItem};
-
 /// Used to store individual items of the error location, e.g. a string for key/field names
 /// or a number for array indices.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, IntoPyObjectRef)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub enum LocItem {
     /// string type key, used to identify items from a dict or anything that implements `__getitem__`
@@ -20,7 +18,7 @@ pub enum LocItem {
     /// integer key, used to get:
     ///   * items from a list
     ///   * items from a tuple
-    ///   * dict with int keys `Dict[int, ...]` (python only)
+    ///   * dict with int keys `dict[int, ...]` (python only)
     ///   * with integer keys in tagged unions
     I(i64),
 }
@@ -43,7 +41,7 @@ impl From<String> for LocItem {
 
 impl From<&String> for LocItem {
     fn from(s: &String) -> Self {
-        s.to_string().into()
+        s.clone().into()
     }
 }
 
@@ -71,29 +69,6 @@ impl From<usize> for LocItem {
     }
 }
 
-/// eventually it might be good to combine PathItem and LocItem
-impl From<PathItem> for LocItem {
-    fn from(path_item: PathItem) -> Self {
-        match path_item {
-            PathItem::S(s, _) => s.into(),
-            PathItem::Pos(val) => val.into(),
-            PathItem::Neg(val) => {
-                let neg_value = -(val as i64);
-                neg_value.into()
-            }
-        }
-    }
-}
-
-impl ToPyObject for LocItem {
-    fn to_object(&self, py: Python<'_>) -> PyObject {
-        match self {
-            Self::S(val) => val.to_object(py),
-            Self::I(val) => val.to_object(py),
-        }
-    }
-}
-
 impl Serialize for LocItem {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -112,43 +87,32 @@ impl Serialize for LocItem {
 /// Note: location in List is stored in **REVERSE** so adding an "outer" item to location involves
 /// pushing to the vec which is faster than inserting and shifting everything along.
 /// Then when "using" location in `Display` and `ToPyObject` order has to be reversed
-#[derive(Clone)]
+#[derive(Clone, Default)]
 #[cfg_attr(debug_assertions, derive(Debug))]
 pub enum Location {
     // no location, avoid creating an unnecessary vec
+    #[default]
     Empty,
     // store the in a vec of LocItems, Note: this is the REVERSE of location, see above
     // we could perhaps use a smallvec or similar here, probably only worth it if we store a Cow in LocItem
     List(Vec<LocItem>),
 }
 
-impl Default for Location {
-    fn default() -> Self {
-        Self::Empty
-    }
-}
+static EMPTY_TUPLE: PyOnceLock<Py<PyTuple>> = PyOnceLock::new();
 
-static EMPTY_TUPLE: GILOnceCell<PyObject> = GILOnceCell::new();
+impl<'py> IntoPyObject<'py> for &'_ Location {
+    type Target = PyTuple;
+    type Output = Bound<'py, PyTuple>;
+    type Error = PyErr;
 
-impl ToPyObject for Location {
-    fn to_object(&self, py: Python<'_>) -> PyObject {
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         match self {
-            Self::List(loc) => PyTuple::new_bound(py, loc.iter().rev()).to_object(py),
-            Self::Empty => EMPTY_TUPLE
-                .get_or_init(py, || PyTuple::empty_bound(py).to_object(py))
-                .clone_ref(py),
+            Location::List(loc) => PyTuple::new(py, loc.iter().rev()),
+            Location::Empty => Ok(EMPTY_TUPLE
+                .get_or_init(py, || PyTuple::empty(py).unbind())
+                .bind(py)
+                .clone()),
         }
-    }
-}
-
-impl From<&LookupPath> for Location {
-    fn from(lookup_path: &LookupPath) -> Self {
-        let v = lookup_path
-            .iter()
-            .rev()
-            .map(|path_item| path_item.clone().into())
-            .collect();
-        Self::List(v)
     }
 }
 
@@ -178,7 +142,7 @@ impl Location {
             Self::Empty => {
                 *self = Self::new_some(loc_item);
             }
-        };
+        }
     }
 }
 

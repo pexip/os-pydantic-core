@@ -1,7 +1,6 @@
-use pyo3::basic::CompareOp;
 use pyo3::exceptions::PyNotImplementedError;
 use pyo3::prelude::*;
-use pyo3::sync::GILOnceCell;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyTuple};
 
 use crate::tools::safe_repr;
@@ -13,45 +12,26 @@ pub struct ArgsKwargs {
     pub(crate) kwargs: Option<Py<PyDict>>,
 }
 
-impl ArgsKwargs {
-    fn eq(&self, py: Python, other: &Self) -> PyResult<bool> {
-        if self.args.bind(py).eq(other.args.bind(py))? {
-            match (&self.kwargs, &other.kwargs) {
-                (Some(d1), Some(d2)) => d1.bind(py).eq(d2.bind(py)),
-                (None, None) => Ok(true),
-                _ => Ok(false),
-            }
-        } else {
-            Ok(false)
-        }
-    }
-}
-
 #[pymethods]
 impl ArgsKwargs {
     #[new]
     #[pyo3(signature = (args, kwargs = None))]
-    fn py_new(py: Python, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> Self {
+    fn py_new(args: Bound<'_, PyTuple>, kwargs: Option<Bound<'_, PyDict>>) -> Self {
         Self {
-            args: args.into_py(py),
-            kwargs: match kwargs {
-                Some(d) if !d.is_empty() => Some(d.to_owned().unbind()),
-                _ => None,
-            },
+            args: args.unbind(),
+            kwargs: kwargs.filter(|d| !d.is_empty()).map(Bound::unbind),
         }
     }
 
-    fn __richcmp__(&self, other: &Self, op: CompareOp, py: Python<'_>) -> PyObject {
-        match op {
-            CompareOp::Eq => match self.eq(py, other) {
-                Ok(b) => b.into_py(py),
-                Err(e) => e.into_py(py),
-            },
-            CompareOp::Ne => match self.eq(py, other) {
-                Ok(b) => (!b).into_py(py),
-                Err(e) => e.into_py(py),
-            },
-            _ => py.NotImplemented(),
+    fn __eq__(&self, py: Python, other: &Self) -> PyResult<bool> {
+        if !self.args.bind(py).eq(&other.args)? {
+            return Ok(false);
+        }
+
+        match (&self.kwargs, &other.kwargs) {
+            (Some(d1), Some(d2)) => d1.bind(py).eq(d2),
+            (None, None) => Ok(true),
+            _ => Ok(false),
         }
     }
 
@@ -64,7 +44,7 @@ impl ArgsKwargs {
     }
 }
 
-static UNDEFINED_CELL: GILOnceCell<Py<PydanticUndefinedType>> = GILOnceCell::new();
+static UNDEFINED_CELL: PyOnceLock<Py<PydanticUndefinedType>> = PyOnceLock::new();
 
 #[pyclass(module = "pydantic_core._pydantic_core", frozen)]
 #[derive(Debug)]
@@ -80,10 +60,9 @@ impl PydanticUndefinedType {
     }
 
     #[staticmethod]
-    pub fn new(py: Python) -> Py<Self> {
-        UNDEFINED_CELL
-            .get_or_init(py, || PydanticUndefinedType {}.into_py(py).extract(py).unwrap())
-            .clone()
+    #[pyo3(name = "new")]
+    pub fn get(py: Python<'_>) -> &Py<Self> {
+        UNDEFINED_CELL.get_or_init(py, || Py::new(py, PydanticUndefinedType {}).unwrap())
     }
 
     fn __repr__(&self) -> &'static str {
@@ -91,7 +70,7 @@ impl PydanticUndefinedType {
     }
 
     fn __copy__(&self, py: Python) -> Py<Self> {
-        UNDEFINED_CELL.get(py).unwrap().clone()
+        UNDEFINED_CELL.get(py).unwrap().clone_ref(py)
     }
 
     #[pyo3(signature = (_memo, /))]

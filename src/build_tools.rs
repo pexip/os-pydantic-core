@@ -1,12 +1,15 @@
 use std::error::Error;
 use std::fmt;
+use std::ops::Deref;
+use std::str::FromStr;
+use std::sync::OnceLock;
 
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
 use pyo3::{intern, FromPyObject, PyErrArguments};
 
-use crate::errors::ValError;
+use crate::errors::{PyLineError, ValError};
 use crate::input::InputType;
 use crate::tools::SchemaDict;
 use crate::ValidationError;
@@ -85,12 +88,23 @@ impl SchemaError {
     pub fn from_val_error(py: Python, error: ValError) -> PyErr {
         match error {
             ValError::LineErrors(raw_errors) => {
-                let line_errors = raw_errors.into_iter().map(|e| e.into_py(py)).collect();
-                let validation_error =
-                    ValidationError::new(line_errors, "Schema".to_object(py), InputType::Python, false);
+                let line_errors = match raw_errors
+                    .into_iter()
+                    .map(|e| PyLineError::from_val_line_error(py, e))
+                    .collect::<PyResult<_>>()
+                {
+                    Ok(errors) => errors,
+                    Err(err) => return err,
+                };
+                let validation_error = ValidationError::new(
+                    line_errors,
+                    PyString::new(py, "Schema").into(),
+                    InputType::Python,
+                    false,
+                );
                 let schema_error = SchemaError(SchemaErrorEnum::ValidationError(validation_error));
                 match Py::new(py, schema_error) {
-                    Ok(err) => PyErr::from_value_bound(err.into_bound(py).into_any()),
+                    Ok(err) => PyErr::from_value(err.into_bound(py).into_any()),
                     Err(err) => err,
                 }
             }
@@ -124,7 +138,7 @@ impl SchemaError {
 
     fn errors(&self, py: Python) -> PyResult<Py<PyList>> {
         match &self.0 {
-            SchemaErrorEnum::Message(_) => Ok(PyList::empty_bound(py).unbind()),
+            SchemaErrorEnum::Message(_) => Ok(PyList::empty(py).unbind()),
             SchemaErrorEnum::ValidationError(error) => error.errors(py, false, false, true),
         }
     }
@@ -165,7 +179,7 @@ macro_rules! py_schema_err {
 pub(crate) use py_schema_err;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) enum ExtraBehavior {
+pub enum ExtraBehavior {
     Allow,
     Forbid,
     Ignore,
@@ -186,12 +200,47 @@ impl ExtraBehavior {
         )?
         .flatten();
         let res = match extra_behavior.as_ref().map(|s| s.to_str()).transpose()? {
-            Some("allow") => Self::Allow,
-            Some("ignore") => Self::Ignore,
-            Some("forbid") => Self::Forbid,
-            Some(v) => return py_schema_err!("Invalid extra_behavior: `{}`", v),
+            Some(s) => Self::from_str(s)?,
             None => default,
         };
         Ok(res)
+    }
+}
+
+impl FromStr for ExtraBehavior {
+    type Err = PyErr;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "allow" => Ok(Self::Allow),
+            "forbid" => Ok(Self::Forbid),
+            "ignore" => Ok(Self::Ignore),
+            s => py_schema_err!("Invalid extra_behavior: `{}`", s),
+        }
+    }
+}
+
+/// A lazily-initialized value.
+///
+/// This is a basic replacement for `LazyLock` which is available only in Rust 1.80+.
+pub struct LazyLock<T> {
+    init: fn() -> T,
+    value: OnceLock<T>,
+}
+
+impl<T> Deref for LazyLock<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.value.get_or_init(self.init)
+    }
+}
+
+impl<T> LazyLock<T> {
+    pub const fn new(init: fn() -> T) -> Self {
+        Self {
+            init,
+            value: OnceLock::new(),
+        }
     }
 }

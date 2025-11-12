@@ -1,8 +1,12 @@
+use std::sync::Arc;
+
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
+use pyo3::IntoPyObjectExt;
 use regex::Regex;
 
+use crate::build_tools::LazyLock;
 use crate::build_tools::{is_strict, py_schema_error_type, schema_or_config, schema_or_config_same};
 use crate::errors::{ErrorType, ValError, ValResult};
 use crate::input::Input;
@@ -16,23 +20,45 @@ pub struct StrValidator {
     coerce_numbers_to_str: bool,
 }
 
+static STRICT_STR_VALIDATOR: LazyLock<Arc<CombinedValidator>> = LazyLock::new(|| {
+    CombinedValidator::Str(StrValidator {
+        strict: true,
+        coerce_numbers_to_str: false,
+    })
+    .into()
+});
+
+static LAX_STR_VALIDATOR: LazyLock<Arc<CombinedValidator>> = LazyLock::new(|| {
+    CombinedValidator::Str(StrValidator {
+        strict: false,
+        coerce_numbers_to_str: false,
+    })
+    .into()
+});
+
 impl BuildValidator for StrValidator {
     const EXPECTED_TYPE: &'static str = "str";
 
     fn build(
         schema: &Bound<'_, PyDict>,
         config: Option<&Bound<'_, PyDict>>,
-        _definitions: &mut DefinitionsBuilder<CombinedValidator>,
-    ) -> PyResult<CombinedValidator> {
+        _definitions: &mut DefinitionsBuilder<Arc<CombinedValidator>>,
+    ) -> PyResult<Arc<CombinedValidator>> {
         let con_str_validator = StrConstrainedValidator::build(schema, config)?;
 
         if con_str_validator.has_constraints_set() {
-            Ok(con_str_validator.into())
+            Ok(Arc::new(con_str_validator.into()))
+        } else if !con_str_validator.coerce_numbers_to_str {
+            if is_strict(schema, config)? {
+                Ok(STRICT_STR_VALIDATOR.clone())
+            } else {
+                Ok(LAX_STR_VALIDATOR.clone())
+            }
         } else {
-            Ok(Self {
+            Ok(CombinedValidator::Str(StrValidator {
                 strict: con_str_validator.strict,
                 coerce_numbers_to_str: con_str_validator.coerce_numbers_to_str,
-            }
+            })
             .into())
         }
     }
@@ -46,10 +72,15 @@ impl Validator for StrValidator {
         py: Python<'py>,
         input: &(impl Input<'py> + ?Sized),
         state: &mut ValidationState<'_, 'py>,
-    ) -> ValResult<PyObject> {
+    ) -> ValResult<Py<PyAny>> {
         input
             .validate_str(state.strict_or(self.strict), self.coerce_numbers_to_str)
-            .map(|val_match| val_match.unpack(state).as_py_string(py, state.cache_str()).into_py(py))
+            .and_then(|val_match| {
+                Ok(val_match
+                    .unpack(state)
+                    .as_py_string(py, state.cache_str())
+                    .into_py_any(py)?)
+            })
     }
 
     fn get_name(&self) -> &str {
@@ -78,7 +109,7 @@ impl Validator for StrConstrainedValidator {
         py: Python<'py>,
         input: &(impl Input<'py> + ?Sized),
         state: &mut ValidationState<'_, 'py>,
-    ) -> ValResult<PyObject> {
+    ) -> ValResult<Py<PyAny>> {
         let either_str = input
             .validate_str(state.strict_or(self.strict), self.coerce_numbers_to_str)?
             .unpack(state);
@@ -138,10 +169,10 @@ impl Validator for StrConstrainedValidator {
             // we haven't modified the string, return the original as it might be a PyString
             either_str.as_py_string(py, state.cache_str())
         };
-        Ok(py_string.into_py(py))
+        Ok(py_string.into_py_any(py)?)
     }
 
-    fn get_name(&self) -> &str {
+    fn get_name(&self) -> &'static str {
         "constrained-str"
     }
 }
@@ -220,7 +251,7 @@ struct Pattern {
 #[derive(Debug, Clone)]
 enum RegexEngine {
     RustRegex(Regex),
-    PythonRe(PyObject),
+    PythonRe(Py<PyAny>),
 }
 
 impl RegexEngine {
@@ -245,7 +276,7 @@ impl Pattern {
 
         let py = pattern.py();
 
-        let re_module = py.import_bound(intern!(py, "re"))?;
+        let re_module = py.import(intern!(py, "re"))?;
         let re_compile = re_module.getattr(intern!(py, "compile"))?;
         let re_pattern = re_module.getattr(intern!(py, "Pattern"))?;
 
@@ -254,7 +285,7 @@ impl Pattern {
             // so that any flags, etc. are preserved
             Ok(Self {
                 pattern: pattern_str,
-                engine: RegexEngine::PythonRe(pattern.to_object(py)),
+                engine: RegexEngine::PythonRe(pattern.unbind()),
             })
         } else {
             let engine = match engine {
