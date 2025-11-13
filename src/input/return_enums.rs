@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::convert::Infallible;
 use std::ops::Rem;
 use std::str::FromStr;
 
@@ -10,10 +11,10 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::ffi;
 use pyo3::intern;
 use pyo3::prelude::*;
-#[cfg(not(PyPy))]
 use pyo3::types::PyFunction;
 use pyo3::types::{PyBytes, PyComplex, PyFloat, PyFrozenSet, PyIterator, PyMapping, PySet, PyString};
 
+use pyo3::IntoPyObjectExt;
 use serde::{ser::Error, Serialize, Serializer};
 
 use crate::errors::{
@@ -125,8 +126,8 @@ pub(crate) fn validate_iter_to_vec<'py>(
     validator: &CombinedValidator,
     state: &mut ValidationState<'_, 'py>,
     fail_fast: bool,
-) -> ValResult<Vec<PyObject>> {
-    let mut output: Vec<PyObject> = Vec::with_capacity(capacity);
+) -> ValResult<Vec<Py<PyAny>>> {
+    let mut output: Vec<Py<PyAny>> = Vec::with_capacity(capacity);
     let mut errors: Vec<ValLineError> = Vec::new();
     let allow_partial = state.allow_partial;
 
@@ -163,13 +164,13 @@ pub(crate) fn validate_iter_to_vec<'py>(
 }
 
 pub trait BuildSet {
-    fn build_add(&self, item: PyObject) -> PyResult<()>;
+    fn build_add(&self, item: Py<PyAny>) -> PyResult<()>;
 
     fn build_len(&self) -> usize;
 }
 
 impl BuildSet for Bound<'_, PySet> {
-    fn build_add(&self, item: PyObject) -> PyResult<()> {
+    fn build_add(&self, item: Py<PyAny>) -> PyResult<()> {
         self.add(item)
     }
 
@@ -179,16 +180,35 @@ impl BuildSet for Bound<'_, PySet> {
 }
 
 impl BuildSet for Bound<'_, PyFrozenSet> {
-    fn build_add(&self, item: PyObject) -> PyResult<()> {
+    fn build_add(&self, item: Py<PyAny>) -> PyResult<()> {
         py_error_on_minusone(self.py(), unsafe {
             // Safety: self.as_ptr() the _only_ pointer to the `frozenset`, and it's allowed
             // to mutate this via the C API when nothing else can refer to it.
-            ffi::PySet_Add(self.as_ptr(), item.to_object(self.py()).as_ptr())
+            ffi::PySet_Add(self.as_ptr(), item.as_ptr())
         })
     }
 
     fn build_len(&self) -> usize {
         self.len()
+    }
+}
+
+fn validate_add<'py>(
+    py: Python<'py>,
+    set: &impl BuildSet,
+    item: impl BorrowInput<'py>,
+    state: &mut ValidationState<'_, 'py>,
+    validator: &CombinedValidator,
+) -> ValResult<()> {
+    let validated_item = validator.validate(py, item.borrow_input(), state)?;
+    match set.build_add(validated_item) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if err.matches(py, py.get_type::<PyTypeError>())? {
+                return Err(ValError::new(ErrorTypeDefaults::SetItemNotHashable, item));
+            }
+            Err(err)?
+        }
     }
 }
 
@@ -214,9 +234,8 @@ pub(crate) fn validate_iter_to_set<'py>(
             false => PartialMode::Off,
         };
         let item = item_result.map_err(|e| any_next_error!(py, e, input, index))?;
-        match validator.validate(py, item.borrow_input(), state) {
-            Ok(item) => {
-                set.build_add(item)?;
+        match validate_add(py, set, item, state, validator) {
+            Ok(()) => {
                 if let Some(max_length) = max_length {
                     if set.build_len() > max_length {
                         return Err(ValError::new(
@@ -259,12 +278,12 @@ pub(crate) fn no_validator_iter_to_vec<'py>(
     input: &(impl Input<'py> + ?Sized),
     iter: impl Iterator<Item = PyResult<impl BorrowInput<'py>>>,
     mut max_length_check: MaxLengthCheck<'_, impl Input<'py> + ?Sized>,
-) -> ValResult<Vec<PyObject>> {
+) -> ValResult<Vec<Py<PyAny>>> {
     iter.enumerate()
         .map(|(index, result)| {
             let v = result.map_err(|e| any_next_error!(py, e, input, index))?;
             max_length_check.incr()?;
-            Ok(v.borrow_input().to_object(py))
+            Ok(v.borrow_input().to_object(py)?.unbind())
         })
         .collect()
 }
@@ -278,9 +297,8 @@ pub(crate) fn iterate_mapping_items<'a, 'py>(
         .items()
         .map_err(|e| mapping_err(e, py, input))?
         .iter()
-        .map_err(|e| mapping_err(e, py, input))?
-        .map(move |item| match item {
-            Ok(item) => item.extract().map_err(|_| {
+        .map(move |item| {
+            item.extract().map_err(|_| {
                 ValError::new(
                     ErrorType::MappingType {
                         error: MAPPING_TUPLE_ERROR.into(),
@@ -288,8 +306,7 @@ pub(crate) fn iterate_mapping_items<'a, 'py>(
                     },
                     input,
                 )
-            }),
-            Err(e) => Err(mapping_err(e, py, input)),
+            })
         });
     Ok(iterator)
 }
@@ -330,15 +347,7 @@ pub(crate) fn iterate_attributes<'a, 'py>(
                 // the PyFunction::is_type_of(attr) catches `staticmethod`, but also any other function,
                 // I think that's better than including static methods in the yielded attributes,
                 // if someone really wants fields, they can use an explicit field, or a function to modify input
-                #[cfg(not(PyPy))]
                 if !is_bound && !attr.is_instance_of::<PyFunction>() {
-                    return Some(Ok((name, attr)));
-                }
-                // MASSIVE HACK! PyFunction doesn't exist for PyPy,
-                // is_instance_of::<PyFunction> crashes with a null pointer, hence this hack, see
-                // https://github.com/pydantic/pydantic-core/pull/161#discussion_r917257635
-                #[cfg(PyPy)]
-                if !is_bound && attr.get_type().to_string() != "<class 'function'>" {
                     return Some(Ok((name, attr)));
                 }
             }
@@ -382,7 +391,7 @@ impl From<&Bound<'_, PyAny>> for GenericIterator<'_> {
     fn from(obj: &Bound<'_, PyAny>) -> Self {
         let py_iter = GenericPyIterator {
             obj: obj.clone().into(),
-            iter: obj.iter().unwrap().into(),
+            iter: obj.try_iter().unwrap().into(),
             index: 0,
         };
         Self::PyIterator(py_iter)
@@ -391,7 +400,7 @@ impl From<&Bound<'_, PyAny>> for GenericIterator<'_> {
 
 #[derive(Debug, Clone)]
 pub struct GenericPyIterator {
-    obj: PyObject,
+    obj: Py<PyAny>,
     iter: Py<PyIterator>,
     index: usize,
 }
@@ -459,20 +468,20 @@ impl<'data> GenericJsonIterator<'data> {
 }
 
 #[cfg_attr(debug_assertions, derive(Debug))]
-pub enum EitherString<'a> {
+pub enum EitherString<'a, 'py> {
     Cow(Cow<'a, str>),
-    Py(Bound<'a, PyString>),
+    Py(Bound<'py, PyString>),
 }
 
-impl<'a> EitherString<'a> {
-    pub fn as_cow(&self) -> ValResult<Cow<str>> {
+impl<'py> EitherString<'_, 'py> {
+    pub fn as_cow(&self) -> ValResult<Cow<'_, str>> {
         match self {
-            Self::Cow(data) => Ok(data.clone()),
+            Self::Cow(data) => Ok(Cow::Borrowed(data)),
             Self::Py(py_str) => Ok(Cow::Borrowed(py_string_str(py_str)?)),
         }
     }
 
-    pub fn as_py_string(&'a self, py: Python<'a>, cache_str: StringCacheMode) -> Bound<'a, PyString> {
+    pub fn as_py_string(&self, py: Python<'py>, cache_str: StringCacheMode) -> Bound<'py, PyString> {
         match self {
             Self::Cow(cow) => new_py_string(py, cow.as_ref(), cache_str),
             Self::Py(py_string) => py_string.clone(),
@@ -480,20 +489,20 @@ impl<'a> EitherString<'a> {
     }
 }
 
-impl<'a> From<&'a str> for EitherString<'a> {
+impl<'a> From<&'a str> for EitherString<'a, '_> {
     fn from(data: &'a str) -> Self {
         Self::Cow(Cow::Borrowed(data))
     }
 }
 
-impl From<String> for EitherString<'_> {
+impl From<String> for EitherString<'_, '_> {
     fn from(data: String) -> Self {
         Self::Cow(Cow::Owned(data))
     }
 }
 
-impl<'a> From<Bound<'a, PyString>> for EitherString<'a> {
-    fn from(date: Bound<'a, PyString>) -> Self {
+impl<'py> From<Bound<'py, PyString>> for EitherString<'_, 'py> {
+    fn from(date: Bound<'py, PyString>) -> Self {
         Self::Py(date)
     }
 }
@@ -508,6 +517,7 @@ pub fn py_string_str<'a>(py_str: &'a Bound<'_, PyString>) -> ValResult<&'a str> 
 }
 
 #[cfg_attr(debug_assertions, derive(Debug))]
+#[derive(IntoPyObject)]
 pub enum EitherBytes<'a, 'py> {
     Cow(Cow<'a, [u8]>),
     Py(Bound<'py, PyBytes>),
@@ -547,25 +557,17 @@ impl EitherBytes<'_, '_> {
     }
 }
 
-impl IntoPy<PyObject> for EitherBytes<'_, '_> {
-    fn into_py(self, py: Python<'_>) -> PyObject {
-        match self {
-            EitherBytes::Cow(bytes) => PyBytes::new_bound(py, &bytes).into_py(py),
-            EitherBytes::Py(py_bytes) => py_bytes.into_py(py),
-        }
-    }
-}
-
 #[cfg_attr(debug_assertions, derive(Debug))]
-pub enum EitherInt<'a> {
+#[derive(IntoPyObject)]
+pub enum EitherInt<'py> {
     I64(i64),
     U64(u64),
     BigInt(BigInt),
-    Py(Bound<'a, PyAny>),
+    Py(Bound<'py, PyAny>),
 }
 
-impl<'a> EitherInt<'a> {
-    pub fn upcast(py_any: &Bound<'a, PyAny>) -> ValResult<Self> {
+impl<'py> EitherInt<'py> {
+    pub fn upcast(py_any: &Bound<'py, PyAny>) -> ValResult<Self> {
         // Safety: we know that py_any is a python int
         if let Some(int_64) = extract_i64(py_any) {
             Ok(Self::I64(int_64))
@@ -575,18 +577,21 @@ impl<'a> EitherInt<'a> {
         }
     }
 
-    pub fn into_i64(self, py: Python<'a>) -> ValResult<i64> {
+    pub fn into_i64(self, py: Python<'py>) -> ValResult<i64> {
         match self {
             EitherInt::I64(i) => Ok(i),
             EitherInt::U64(u) => match i64::try_from(u) {
                 Ok(u) => Ok(u),
-                Err(_) => Err(ValError::new(ErrorTypeDefaults::IntParsingSize, u.into_py(py).bind(py))),
+                Err(_) => Err(ValError::new(
+                    ErrorTypeDefaults::IntParsingSize,
+                    u.into_bound_py_any(py)?,
+                )),
             },
             EitherInt::BigInt(u) => match i64::try_from(u) {
                 Ok(u) => Ok(u),
                 Err(e) => Err(ValError::new(
                     ErrorTypeDefaults::IntParsingSize,
-                    e.into_original().into_py(py).bind(py),
+                    e.into_original().into_bound_py_any(py)?,
                 )),
             },
             EitherInt::Py(i) => i
@@ -635,22 +640,11 @@ impl<'a> EitherInt<'a> {
     }
 }
 
-impl IntoPy<PyObject> for EitherInt<'_> {
-    fn into_py(self, py: Python<'_>) -> PyObject {
-        match self {
-            Self::I64(int) => int.into_py(py),
-            Self::U64(int) => int.into_py(py),
-            Self::BigInt(int) => int.into_py(py),
-            Self::Py(int) => int.into_py(py),
-        }
-    }
-}
-
 #[cfg_attr(debug_assertions, derive(Debug))]
-#[derive(Clone)]
-pub enum EitherFloat<'a> {
+#[derive(Clone, IntoPyObject)]
+pub enum EitherFloat<'py> {
     F64(f64),
-    Py(Bound<'a, PyFloat>),
+    Py(Bound<'py, PyFloat>),
 }
 
 impl EitherFloat<'_> {
@@ -662,30 +656,12 @@ impl EitherFloat<'_> {
     }
 }
 
-impl IntoPy<PyObject> for EitherFloat<'_> {
-    fn into_py(self, py: Python<'_>) -> PyObject {
-        match self {
-            Self::F64(float) => float.into_py(py),
-            Self::Py(float) => float.into_py(py),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, IntoPyObject)]
 #[serde(untagged)]
 pub enum Int {
     I64(i64),
     #[serde(serialize_with = "serialize_bigint_as_number")]
     Big(BigInt),
-}
-
-impl IntoPy<PyObject> for Int {
-    fn into_py(self, py: Python<'_>) -> PyObject {
-        match self {
-            Self::I64(i) => i.into_py(py),
-            Self::Big(big_i) => big_i.into_py(py),
-        }
-    }
 }
 
 // The default serialization for BigInt is some internal representation which roundtrips efficiently
@@ -739,38 +715,21 @@ impl FromPyObject<'_> for Int {
     }
 }
 
-impl ToPyObject for Int {
-    fn to_object(&self, py: Python<'_>) -> PyObject {
-        match self {
-            Self::I64(i) => i.to_object(py),
-            Self::Big(big_i) => big_i.to_object(py),
-        }
-    }
-}
-
 #[derive(Clone)]
-pub enum EitherComplex<'a> {
+pub enum EitherComplex<'py> {
     Complex([f64; 2]),
-    Py(Bound<'a, PyComplex>),
+    Py(Bound<'py, PyComplex>),
 }
 
-impl IntoPy<PyObject> for EitherComplex<'_> {
-    fn into_py(self, py: Python<'_>) -> PyObject {
-        match self {
-            Self::Complex(c) => PyComplex::from_doubles_bound(py, c[0], c[1]).into_py(py),
-            Self::Py(c) => c.into_py(py),
-        }
-    }
-}
+impl<'py> IntoPyObject<'py> for EitherComplex<'py> {
+    type Target = PyComplex;
+    type Output = Bound<'py, PyComplex>;
+    type Error = Infallible;
 
-impl EitherComplex<'_> {
-    pub fn as_f64(&self, py: Python<'_>) -> [f64; 2] {
+    fn into_pyobject(self, py: Python<'py>) -> Result<Bound<'py, PyComplex>, Infallible> {
         match self {
-            EitherComplex::Complex(f) => *f,
-            EitherComplex::Py(f) => [
-                f.getattr(intern!(py, "real")).unwrap().extract().unwrap(),
-                f.getattr(intern!(py, "imag")).unwrap().extract().unwrap(),
-            ],
+            EitherComplex::Complex(c) => Ok(PyComplex::from_doubles(py, c[0], c[1])),
+            EitherComplex::Py(c) => Ok(c),
         }
     }
 }

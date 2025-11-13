@@ -4,7 +4,7 @@ use std::fmt;
 
 use pyo3::exceptions::{PyKeyError, PyTypeError};
 use pyo3::prelude::*;
-use pyo3::sync::GILOnceCell;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyList};
 
 use ahash::AHashMap;
@@ -18,11 +18,11 @@ use crate::tools::{extract_i64, py_err, py_error_type};
 use super::PydanticCustomError;
 
 #[pyfunction]
-pub fn list_all_errors(py: Python) -> PyResult<Bound<'_, PyList>> {
+pub fn list_all_errors(py: Python<'_>) -> PyResult<Bound<'_, PyList>> {
     let mut errors: Vec<Bound<'_, PyDict>> = Vec::with_capacity(100);
     for error_type in ErrorType::iter() {
         if !matches!(error_type, ErrorType::CustomError { .. }) {
-            let d = PyDict::new_bound(py);
+            let d = PyDict::new(py);
             d.set_item("type", error_type.to_string())?;
             let message_template_python = error_type.message_template_python();
             d.set_item("message_template_python", message_template_python)?;
@@ -39,7 +39,7 @@ pub fn list_all_errors(py: Python) -> PyResult<Bound<'_, PyList>> {
             errors.push(d);
         }
     }
-    Ok(PyList::new_bound(py, errors))
+    PyList::new(py, errors)
 }
 
 fn field_from_context<'py, T: FromPyObject<'py>>(
@@ -124,7 +124,7 @@ macro_rules! error_types {
                     $(
                         Self::$item { context, $($key,)* } => {
                             $(
-                                dict.set_item::<&str, Py<PyAny>>(stringify!($key), $key.to_object(py))?;
+                                dict.set_item(stringify!($key), $key)?;
                             )*
                             if let Some(ctx) = context {
                                 dict.update(ctx.bind(py).downcast::<PyMapping>()?)?;
@@ -195,6 +195,9 @@ error_types! {
     DataclassExactType {
         class_name: {ctx_type: String, ctx_fn: field_from_context},
     },
+    // ---------------------
+    // Default factory not called (happens when there's already an error and the factory takes data)
+    DefaultFactoryNotCalled {},
     // ---------------------
     // None errors
     NoneRequired {},
@@ -268,6 +271,7 @@ error_types! {
     // ---------------------
     // set errors
     SetType {},
+    SetItemNotHashable {},
     // ---------------------
     // bool errors
     BoolType {},
@@ -298,10 +302,10 @@ error_types! {
     // ---------------------
     // python errors from functions
     ValueError {
-        error: {ctx_type: Option<PyObject>, ctx_fn: field_from_context}, // Use Option because EnumIter requires Default to be implemented
+        error: {ctx_type: Option<Py<PyAny>>, ctx_fn: field_from_context}, // Use Option because EnumIter requires Default to be implemented
     },
     AssertionError {
-        error: {ctx_type: Option<PyObject>, ctx_fn: field_from_context}, // Use Option because EnumIter requires Default to be implemented
+        error: {ctx_type: Option<Py<PyAny>>, ctx_fn: field_from_context}, // Use Option because EnumIter requires Default to be implemented
     },
     // Note: strum message and serialize are not used here
     CustomError {
@@ -315,6 +319,8 @@ error_types! {
         expected: {ctx_type: String, ctx_fn: field_from_context},
     },
     // ---------------------
+    // missing sentinel
+    MissingSentinelError {},
     // date errors
     DateType {},
     DateParsing {
@@ -462,7 +468,7 @@ fn plural_s<T: From<u8> + PartialEq>(value: T) -> &'static str {
     }
 }
 
-static ERROR_TYPE_LOOKUP: GILOnceCell<AHashMap<String, ErrorType>> = GILOnceCell::new();
+static ERROR_TYPE_LOOKUP: PyOnceLock<AHashMap<String, ErrorType>> = PyOnceLock::new();
 
 impl ErrorType {
     pub fn new_custom_error(py: Python, custom_error: PydanticCustomError) -> Self {
@@ -474,6 +480,7 @@ impl ErrorType {
     }
 
     pub fn message_template_python(&self) -> &'static str {
+        #[allow(clippy::match_same_arms)]  // much nicer to have the messages explicitly listed
         match self {
             Self::NoSuchAttribute {..} => "Object has no attribute '{attribute}'",
             Self::JsonInvalid {..} => "Invalid JSON: {error}",
@@ -490,6 +497,7 @@ impl ErrorType {
             Self::ModelAttributesType {..} => "Input should be a valid dictionary or object to extract fields from",
             Self::DataclassType {..} => "Input should be a dictionary or an instance of {class_name}",
             Self::DataclassExactType {..} => "Input should be an instance of {class_name}",
+            Self::DefaultFactoryNotCalled {..} => "The default factory uses validated data, but at least one validation error occurred",
             Self::NoneRequired {..} => "Input should be None",
             Self::GreaterThan {..} => "Input should be greater than {gt}",
             Self::GreaterThanEqual {..} => "Input should be greater than or equal to {ge}",
@@ -513,6 +521,7 @@ impl ErrorType {
             Self::ListType {..} => "Input should be a valid list",
             Self::TupleType {..} => "Input should be a valid tuple",
             Self::SetType {..} => "Input should be a valid set",
+            Self::SetItemNotHashable {..} => "Set items should be hashable",
             Self::BoolType {..} => "Input should be a valid boolean",
             Self::BoolParsing {..} => "Input should be a valid boolean, unable to interpret input",
             Self::IntType {..} => "Input should be a valid integer",
@@ -529,6 +538,7 @@ impl ErrorType {
             Self::AssertionError {..} => "Assertion failed, {error}",
             Self::CustomError {..} => "",  // custom errors are handled separately
             Self::LiteralError {..} => "Input should be {expected}",
+            Self::MissingSentinelError { .. } => "Input should be the 'MISSING' sentinel",
             Self::DateType {..} => "Input should be a valid date",
             Self::DateParsing {..} => "Input should be a valid date in the format YYYY-MM-DD, {error}",
             Self::DateFromDatetimeParsing {..} => "Input should be a valid date or datetime, {error}",
@@ -627,12 +637,24 @@ impl ErrorType {
         };
         match self {
             Self::NoSuchAttribute { attribute, .. } => render!(tmpl, attribute),
-            Self::JsonInvalid { error, .. } => render!(tmpl, error),
+            Self::JsonInvalid { error, .. }
+            | Self::GetAttributeError { error, .. }
+            | Self::IterationError { error, .. }
+            | Self::DatetimeObjectInvalid { error, .. }
+            | Self::UrlParsing { error, .. }
+            | Self::UuidParsing { error, .. } => render!(tmpl, error),
+            Self::MappingType { error, .. }
+            | Self::DateParsing { error, .. }
+            | Self::DateFromDatetimeParsing { error, .. }
+            | Self::TimeParsing { error, .. }
+            | Self::DatetimeParsing { error, .. }
+            | Self::DatetimeFromDateParsing { error, .. }
+            | Self::TimeDeltaParsing { error, .. }
+            | Self::UrlSyntaxViolation { error, .. } => render!(tmpl, error),
             Self::NeedsPythonObject { method_name, .. } => render!(tmpl, method_name),
-            Self::GetAttributeError { error, .. } => render!(tmpl, error),
-            Self::ModelType { class_name, .. } => render!(tmpl, class_name),
-            Self::DataclassType { class_name, .. } => render!(tmpl, class_name),
-            Self::DataclassExactType { class_name, .. } => render!(tmpl, class_name),
+            Self::ModelType { class_name, .. }
+            | Self::DataclassType { class_name, .. }
+            | Self::DataclassExactType { class_name, .. } => render!(tmpl, class_name),
             Self::GreaterThan { gt, .. } => to_string_render!(tmpl, gt),
             Self::GreaterThanEqual { ge, .. } => to_string_render!(tmpl, ge),
             Self::LessThan { lt, .. } => to_string_render!(tmpl, lt),
@@ -657,26 +679,18 @@ impl ErrorType {
                 let actual_length = actual_length.map_or(Cow::Borrowed("more"), |v| Cow::Owned(v.to_string()));
                 to_string_render!(tmpl, field_type, max_length, actual_length, expected_plural,)
             }
-            Self::IterationError { error, .. } => render!(tmpl, error),
-            Self::StringTooShort { min_length, .. } => {
+            Self::StringTooShort { min_length, .. } | Self::BytesTooShort { min_length, .. } => {
                 let expected_plural = plural_s(*min_length);
                 to_string_render!(tmpl, min_length, expected_plural)
             }
-            Self::StringTooLong { max_length, .. } => {
+            Self::StringTooLong { max_length, .. }
+            | Self::BytesTooLong { max_length, .. }
+            | Self::UrlTooLong { max_length, .. } => {
                 let expected_plural = plural_s(*max_length);
                 to_string_render!(tmpl, max_length, expected_plural)
             }
             Self::StringPatternMismatch { pattern, .. } => render!(tmpl, pattern),
             Self::Enum { expected, .. } => to_string_render!(tmpl, expected),
-            Self::MappingType { error, .. } => render!(tmpl, error),
-            Self::BytesTooShort { min_length, .. } => {
-                let expected_plural = plural_s(*min_length);
-                to_string_render!(tmpl, min_length, expected_plural)
-            }
-            Self::BytesTooLong { max_length, .. } => {
-                let expected_plural = plural_s(*max_length);
-                to_string_render!(tmpl, max_length, expected_plural)
-            }
             Self::BytesInvalidEncoding {
                 encoding,
                 encoding_error,
@@ -700,18 +714,10 @@ impl ErrorType {
                 ..
             } => PydanticCustomError::format_message(message_template, context.as_ref().map(|c| c.bind(py))),
             Self::LiteralError { expected, .. } => render!(tmpl, expected),
-            Self::DateParsing { error, .. } => render!(tmpl, error),
-            Self::DateFromDatetimeParsing { error, .. } => render!(tmpl, error),
-            Self::TimeParsing { error, .. } => render!(tmpl, error),
-            Self::DatetimeParsing { error, .. } => render!(tmpl, error),
-            Self::DatetimeFromDateParsing { error, .. } => render!(tmpl, error),
-            Self::DatetimeObjectInvalid { error, .. } => render!(tmpl, error),
             Self::TimezoneOffset {
                 tz_expected, tz_actual, ..
             } => to_string_render!(tmpl, tz_expected, tz_actual),
-            Self::TimeDeltaParsing { error, .. } => render!(tmpl, error),
-            Self::IsInstanceOf { class, .. } => render!(tmpl, class),
-            Self::IsSubclassOf { class, .. } => render!(tmpl, class),
+            Self::IsInstanceOf { class, .. } | Self::IsSubclassOf { class, .. } => render!(tmpl, class),
             Self::UnionTagInvalid {
                 discriminator,
                 tag,
@@ -719,14 +725,7 @@ impl ErrorType {
                 ..
             } => render!(tmpl, discriminator, tag, expected_tags),
             Self::UnionTagNotFound { discriminator, .. } => render!(tmpl, discriminator),
-            Self::UrlParsing { error, .. } => render!(tmpl, error),
-            Self::UrlSyntaxViolation { error, .. } => render!(tmpl, error),
-            Self::UrlTooLong { max_length, .. } => {
-                let expected_plural = plural_s(*max_length);
-                to_string_render!(tmpl, max_length, expected_plural)
-            }
             Self::UrlScheme { expected_schemes, .. } => render!(tmpl, expected_schemes),
-            Self::UuidParsing { error, .. } => render!(tmpl, error),
             Self::UuidVersion { expected_version, .. } => to_string_render!(tmpl, expected_version),
             Self::DecimalMaxDigits { max_digits, .. } => {
                 let expected_plural = plural_s(*max_digits);
@@ -745,7 +744,7 @@ impl ErrorType {
     }
 
     pub fn py_dict(&self, py: Python) -> PyResult<Option<Py<PyDict>>> {
-        let dict = PyDict::new_bound(py);
+        let dict = PyDict::new(py);
         let custom_ctx_used = self.py_dict_update_ctx(py, &dict)?;
 
         if let Self::CustomError { .. } = self {
@@ -766,7 +765,7 @@ impl ErrorType {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, IntoPyObject, IntoPyObjectRef)]
 pub enum Number {
     Int(i64),
     BigInt(BigInt),
@@ -821,16 +820,6 @@ impl fmt::Display for Number {
             Self::Int(i) => write!(f, "{i}"),
             Self::BigInt(i) => write!(f, "{i}"),
             Self::String(s) => write!(f, "{s}"),
-        }
-    }
-}
-impl ToPyObject for Number {
-    fn to_object(&self, py: Python<'_>) -> PyObject {
-        match self {
-            Self::Int(i) => i.into_py(py),
-            Self::BigInt(i) => i.clone().into_py(py),
-            Self::Float(f) => f.into_py(py),
-            Self::String(s) => s.into_py(py),
         }
     }
 }

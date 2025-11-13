@@ -1,9 +1,10 @@
 use std::borrow::Cow;
+use std::collections::HashSet;
 
-use jiter::{JsonArray, JsonObject, JsonValue, LazyIndexMap};
+use jiter::{JsonArray, JsonObject, JsonValue};
+use num_traits::cast::ToPrimitive;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
-use smallvec::SmallVec;
 use speedate::MicrosecondsPrecisionOverflowBehavior;
 use strum::EnumMessage;
 
@@ -12,7 +13,7 @@ use crate::input::return_enums::EitherComplex;
 use crate::lookup_key::{LookupKey, LookupPath};
 use crate::validators::complex::string_to_complex;
 use crate::validators::decimal::create_decimal;
-use crate::validators::ValBytesMode;
+use crate::validators::{TemporalUnitMode, ValBytesMode};
 
 use super::datetime::{
     bytes_as_date, bytes_as_datetime, bytes_as_time, bytes_as_timedelta, float_as_datetime, float_as_duration,
@@ -44,6 +45,11 @@ impl From<JsonValue<'_>> for LocItem {
 }
 
 impl<'py, 'data> Input<'py> for JsonValue<'data> {
+    #[inline]
+    fn py_converter(&self) -> impl IntoPyObject<'py> + '_ {
+        self
+    }
+
     fn as_error_value(&self) -> InputValue {
         // cloning JsonValue is cheap due to use of Arc
         InputValue::Json(self.to_static())
@@ -54,16 +60,35 @@ impl<'py, 'data> Input<'py> for JsonValue<'data> {
     }
 
     fn as_kwargs(&self, py: Python<'py>) -> Option<Bound<'py, PyDict>> {
-        match self {
-            JsonValue::Object(object) => {
-                let dict = PyDict::new_bound(py);
-                for (k, v) in LazyIndexMap::iter(object) {
-                    dict.set_item(k, v.to_object(py)).unwrap();
+        let JsonValue::Object(object) = self else {
+            return None;
+        };
+
+        // deduplicate keys before creating objects to avoid wasted work
+        // jiter doesn't deduplicate keys, so duplicate keys in JSON will appear multiple times
+        // in the slice. We iterate backwards to keep only the last value for each key while preserving order
+        let unique_indices_reversed = {
+            let mut seen = HashSet::with_capacity(object.len());
+            let mut unique = Vec::with_capacity(object.len());
+
+            for (i, (k, _)) in object.as_slice().iter().enumerate().rev() {
+                if seen.insert(k) {
+                    unique.push(i);
                 }
-                Some(dict)
             }
-            _ => None,
+
+            unique
+        };
+
+        let object = object.as_slice();
+
+        let dict = PyDict::new(py);
+        for &i in unique_indices_reversed.iter().rev() {
+            let (k, v) = &object[i];
+            dict.set_item(k, v).unwrap();
         }
+
+        Some(dict)
     }
 
     type Arguments<'a>
@@ -77,6 +102,11 @@ impl<'py, 'data> Input<'py> for JsonValue<'data> {
             JsonValue::Array(array) => Ok(JsonArgs::new(Some(array), None)),
             _ => Err(ValError::new(ErrorTypeDefaults::ArgumentsType, self)),
         }
+    }
+
+    #[cfg_attr(has_coverage_attribute, coverage(off))]
+    fn validate_args_v3(&self) -> ValResult<Self::Arguments<'_>> {
+        Err(ValError::new(ErrorTypeDefaults::ArgumentsType, self))
     }
 
     fn validate_dataclass_args<'a>(&'a self, class_name: &str) -> ValResult<JsonArgs<'a, 'data>> {
@@ -95,7 +125,11 @@ impl<'py, 'data> Input<'py> for JsonValue<'data> {
         }
     }
 
-    fn validate_str(&self, strict: bool, coerce_numbers_to_str: bool) -> ValResult<ValidationMatch<EitherString<'_>>> {
+    fn validate_str(
+        &self,
+        strict: bool,
+        coerce_numbers_to_str: bool,
+    ) -> ValResult<ValidationMatch<EitherString<'_, 'py>>> {
         // Justification for `strict` instead of `exact` is that in JSON strings can also
         // represent other datatypes such as UUID and date more exactly, so string is a
         // converting input
@@ -151,7 +185,7 @@ impl<'py, 'data> Input<'py> for JsonValue<'data> {
         }
     }
 
-    fn exact_str(&self) -> ValResult<EitherString<'_>> {
+    fn exact_str(&self) -> ValResult<EitherString<'_, 'py>> {
         match self {
             JsonValue::Str(s) => Ok(s.as_ref().into()),
             _ => Err(ValError::new(ErrorTypeDefaults::StringType, self)),
@@ -162,6 +196,9 @@ impl<'py, 'data> Input<'py> for JsonValue<'data> {
         match self {
             JsonValue::Float(f) => Ok(ValidationMatch::exact(EitherFloat::F64(*f))),
             JsonValue::Int(i) => Ok(ValidationMatch::strict(EitherFloat::F64(*i as f64))),
+            JsonValue::BigInt(b) => Ok(ValidationMatch::strict(EitherFloat::F64(
+                b.to_f64().expect("BigInt should always return some value"),
+            ))),
             JsonValue::Bool(b) if !strict => Ok(ValidationMatch::lax(EitherFloat::F64(if *b { 1.0 } else { 0.0 }))),
             JsonValue::Str(str) if !strict => str_as_float(self, str).map(ValidationMatch::lax),
             _ => Err(ValError::new(ErrorTypeDefaults::FloatType, self)),
@@ -171,10 +208,10 @@ impl<'py, 'data> Input<'py> for JsonValue<'data> {
     fn validate_decimal(&self, _strict: bool, py: Python<'py>) -> ValMatch<Bound<'py, PyAny>> {
         match self {
             JsonValue::Float(f) => {
-                create_decimal(&PyString::new_bound(py, &f.to_string()), self).map(ValidationMatch::strict)
+                create_decimal(&PyString::new(py, &f.to_string()), self).map(ValidationMatch::strict)
             }
             JsonValue::Str(..) | JsonValue::Int(..) | JsonValue::BigInt(..) => {
-                create_decimal(self.to_object(py).bind(py), self).map(ValidationMatch::strict)
+                create_decimal(&self.into_pyobject(py)?, self).map(ValidationMatch::strict)
             }
             _ => Err(ValError::new(ErrorTypeDefaults::DecimalType, self)),
         }
@@ -248,16 +285,23 @@ impl<'py, 'data> Input<'py> for JsonValue<'data> {
             JsonValue::Str(s) => Ok(string_to_vec(s).into()),
             JsonValue::Object(object) => {
                 // return keys iterator to match python's behavior
-                let keys: JsonArray = JsonArray::new(object.keys().map(|k| JsonValue::Str(k.clone())).collect());
+                // FIXME jiter doesn't deduplicate keys, should probably do that here before iteration.
+                let keys: JsonArray = JsonArray::new(
+                    object
+                        .as_slice()
+                        .iter()
+                        .map(|(k, _)| JsonValue::Str(k.clone()))
+                        .collect(),
+                );
                 Ok(GenericIterator::from(keys).into_static())
             }
             _ => Err(ValError::new(ErrorTypeDefaults::IterableType, self)),
         }
     }
 
-    fn validate_date(&self, _strict: bool) -> ValResult<ValidationMatch<EitherDate<'py>>> {
+    fn validate_date(&self, _strict: bool, mode: TemporalUnitMode) -> ValResult<ValidationMatch<EitherDate<'py>>> {
         match self {
-            JsonValue::Str(v) => bytes_as_date(self, v.as_bytes()).map(ValidationMatch::strict),
+            JsonValue::Str(v) => bytes_as_date(self, v.as_bytes(), mode).map(ValidationMatch::strict),
             _ => Err(ValError::new(ErrorTypeDefaults::DateType, self)),
         }
     }
@@ -291,13 +335,14 @@ impl<'py, 'data> Input<'py> for JsonValue<'data> {
         &self,
         strict: bool,
         microseconds_overflow_behavior: speedate::MicrosecondsPrecisionOverflowBehavior,
+        mode: TemporalUnitMode,
     ) -> ValResult<ValidationMatch<EitherDateTime<'py>>> {
         match self {
             JsonValue::Str(v) => {
-                bytes_as_datetime(self, v.as_bytes(), microseconds_overflow_behavior).map(ValidationMatch::strict)
+                bytes_as_datetime(self, v.as_bytes(), microseconds_overflow_behavior, mode).map(ValidationMatch::strict)
             }
-            JsonValue::Int(v) if !strict => int_as_datetime(self, *v, 0).map(ValidationMatch::lax),
-            JsonValue::Float(v) if !strict => float_as_datetime(self, *v).map(ValidationMatch::lax),
+            JsonValue::Int(v) if !strict => int_as_datetime(self, *v, 0, mode).map(ValidationMatch::lax),
+            JsonValue::Float(v) if !strict => float_as_datetime(self, *v, mode).map(ValidationMatch::lax),
             _ => Err(ValError::new(ErrorTypeDefaults::DatetimeType, self)),
         }
     }
@@ -324,7 +369,7 @@ impl<'py, 'data> Input<'py> for JsonValue<'data> {
     fn validate_complex(&self, strict: bool, py: Python<'py>) -> ValResult<ValidationMatch<EitherComplex<'py>>> {
         match self {
             JsonValue::Str(s) => Ok(ValidationMatch::strict(EitherComplex::Py(string_to_complex(
-                &PyString::new_bound(py, s),
+                &PyString::new(py, s),
                 self,
             )?))),
             JsonValue::Float(f) => {
@@ -348,6 +393,11 @@ impl<'py, 'data> Input<'py> for JsonValue<'data> {
 
 /// Required for JSON Object keys so the string can behave like an Input
 impl<'py> Input<'py> for str {
+    #[inline]
+    fn py_converter(&self) -> impl IntoPyObject<'py> + '_ {
+        self
+    }
+
     fn as_error_value(&self) -> InputValue {
         // Justification for the clone: this is on the error pathway and we are generally ok
         // with errors having a performance penalty
@@ -362,6 +412,11 @@ impl<'py> Input<'py> for str {
 
     #[cfg_attr(has_coverage_attribute, coverage(off))]
     fn validate_args(&self) -> ValResult<Never> {
+        Err(ValError::new(ErrorTypeDefaults::ArgumentsType, self))
+    }
+
+    #[cfg_attr(has_coverage_attribute, coverage(off))]
+    fn validate_args_v3(&self) -> ValResult<Never> {
         Err(ValError::new(ErrorTypeDefaults::ArgumentsType, self))
     }
 
@@ -381,7 +436,7 @@ impl<'py> Input<'py> for str {
         &self,
         _strict: bool,
         _coerce_numbers_to_str: bool,
-    ) -> ValResult<ValidationMatch<EitherString<'_>>> {
+    ) -> ValResult<ValidationMatch<EitherString<'_, 'py>>> {
         // Justification for `strict` instead of `exact` is that in JSON strings can also
         // represent other datatypes such as UUID and date more exactly, so string is a
         // converting input
@@ -414,7 +469,7 @@ impl<'py> Input<'py> for str {
     }
 
     fn validate_decimal(&self, _strict: bool, py: Python<'py>) -> ValMatch<Bound<'py, PyAny>> {
-        create_decimal(self.to_object(py).bind(py), self).map(ValidationMatch::lax)
+        create_decimal(self.into_pyobject(py)?.as_any(), self).map(ValidationMatch::lax)
     }
 
     type Dict<'a> = Never;
@@ -453,8 +508,8 @@ impl<'py> Input<'py> for str {
         Ok(string_to_vec(self).into())
     }
 
-    fn validate_date(&self, _strict: bool) -> ValResult<ValidationMatch<EitherDate<'py>>> {
-        bytes_as_date(self, self.as_bytes()).map(ValidationMatch::lax)
+    fn validate_date(&self, _strict: bool, mode: TemporalUnitMode) -> ValResult<ValidationMatch<EitherDate<'py>>> {
+        bytes_as_date(self, self.as_bytes(), mode).map(ValidationMatch::lax)
     }
 
     fn validate_time(
@@ -469,8 +524,9 @@ impl<'py> Input<'py> for str {
         &self,
         _strict: bool,
         microseconds_overflow_behavior: MicrosecondsPrecisionOverflowBehavior,
+        mode: TemporalUnitMode,
     ) -> ValResult<ValidationMatch<EitherDateTime<'py>>> {
-        bytes_as_datetime(self, self.as_bytes(), microseconds_overflow_behavior).map(ValidationMatch::lax)
+        bytes_as_datetime(self, self.as_bytes(), microseconds_overflow_behavior, mode).map(ValidationMatch::lax)
     }
 
     fn validate_timedelta(
@@ -483,7 +539,7 @@ impl<'py> Input<'py> for str {
 
     fn validate_complex(&self, _strict: bool, py: Python<'py>) -> ValResult<ValidationMatch<EitherComplex<'py>>> {
         Ok(ValidationMatch::strict(EitherComplex::Py(string_to_complex(
-            self.to_object(py).downcast_bound::<PyString>(py)?,
+            &self.into_pyobject(py)?,
             self,
         )?)))
     }
@@ -533,11 +589,11 @@ impl<'data> ValidatedDict<'_> for &'_ JsonObject<'data> {
         &'a self,
         consumer: impl ConsumeIterator<ValResult<(Self::Key<'a>, Self::Item<'a>)>, Output = R>,
     ) -> ValResult<R> {
-        Ok(consumer.consume_iterator(LazyIndexMap::iter(self).map(|(k, v)| Ok((k.as_ref(), v)))))
+        Ok(consumer.consume_iterator(self.as_slice().iter().map(|(k, v)| Ok((k.as_ref(), v)))))
     }
 
     fn last_key(&self) -> Option<Self::Key<'_>> {
-        self.keys().last().map(AsRef::as_ref)
+        self.last().map(|(k, _)| k.as_ref())
     }
 }
 
@@ -545,7 +601,7 @@ impl<'a, 'py, 'data> ValidatedList<'py> for &'a JsonArray<'data> {
     type Item = &'a JsonValue<'data>;
 
     fn len(&self) -> Option<usize> {
-        Some(SmallVec::len(self))
+        Some(Vec::len(self))
     }
     fn iterate<R>(self, consumer: impl ConsumeIterator<PyResult<Self::Item>, Output = R>) -> ValResult<R> {
         Ok(consumer.consume_iterator(self.iter().map(Ok)))
@@ -559,7 +615,13 @@ impl<'a, 'data> ValidatedTuple<'_> for &'a JsonArray<'data> {
     type Item = &'a JsonValue<'data>;
 
     fn len(&self) -> Option<usize> {
-        Some(SmallVec::len(self))
+        Some(Vec::len(self))
+    }
+    fn try_for_each(self, mut f: impl FnMut(PyResult<Self::Item>) -> ValResult<()>) -> ValResult<()> {
+        for item in self.iter() {
+            f(Ok(item))?;
+        }
+        Ok(())
     }
     fn iterate<R>(self, consumer: impl ConsumeIterator<PyResult<Self::Item>, Output = R>) -> ValResult<R> {
         Ok(consumer.consume_iterator(self.iter().map(Ok)))
@@ -627,12 +689,12 @@ impl<'data> KeywordArgs<'_> for JsonObject<'data> {
         Self: 'a;
 
     fn len(&self) -> usize {
-        LazyIndexMap::len(self)
+        Vec::len(self)
     }
     fn get_item<'k>(&self, key: &'k LookupKey) -> ValResult<Option<(&'k LookupPath, Self::Item<'_>)>> {
         key.json_get(self)
     }
     fn iter(&self) -> impl Iterator<Item = ValResult<(Self::Key<'_>, Self::Item<'_>)>> {
-        LazyIndexMap::iter(self).map(|(k, v)| Ok((k.as_ref(), v)))
+        self.as_slice().iter().map(|(k, v)| Ok((k.as_ref(), v)))
     }
 }

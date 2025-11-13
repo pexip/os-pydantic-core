@@ -1,9 +1,10 @@
 use std::fmt;
 use std::sync::Arc;
 
-use pyo3::types::PyDict;
-use pyo3::{prelude::*, PyTraverseError, PyVisit};
+use pyo3::types::{PyDict, PyString};
+use pyo3::{prelude::*, IntoPyObjectExt, PyTraverseError, PyVisit};
 
+use crate::build_tools::ExtraBehavior;
 use crate::errors::{ErrorType, LocItem, ValError, ValResult};
 use crate::input::{BorrowInput, GenericIterator, Input};
 use crate::py_gc::PyGcTraverse;
@@ -32,9 +33,9 @@ impl BuildValidator for GeneratorValidator {
     fn build(
         schema: &Bound<'_, PyDict>,
         config: Option<&Bound<'_, PyDict>>,
-        definitions: &mut DefinitionsBuilder<CombinedValidator>,
-    ) -> PyResult<CombinedValidator> {
-        let item_validator = get_items_schema(schema, config, definitions)?.map(Arc::new);
+        definitions: &mut DefinitionsBuilder<Arc<CombinedValidator>>,
+    ) -> PyResult<Arc<CombinedValidator>> {
+        let item_validator = get_items_schema(schema, config, definitions)?;
         let name = match item_validator {
             Some(ref v) => format!("{}[{}]", Self::EXPECTED_TYPE, v.get_name()),
             None => format!("{}[any]", Self::EXPECTED_TYPE),
@@ -45,14 +46,14 @@ impl BuildValidator for GeneratorValidator {
         let validation_error_cause: bool = config
             .get_as(pyo3::intern!(schema.py(), "validation_error_cause"))?
             .unwrap_or(false);
-        Ok(Self {
+        Ok(CombinedValidator::Generator(Self {
             item_validator,
             name,
             min_length: schema.get_as(pyo3::intern!(schema.py(), "min_length"))?,
             max_length: schema.get_as(pyo3::intern!(schema.py(), "max_length"))?,
             hide_input_in_errors,
             validation_error_cause,
-        }
+        })
         .into())
     }
 }
@@ -65,14 +66,13 @@ impl Validator for GeneratorValidator {
         py: Python<'py>,
         input: &(impl Input<'py> + ?Sized),
         state: &mut ValidationState<'_, 'py>,
-    ) -> ValResult<PyObject> {
+    ) -> ValResult<Py<PyAny>> {
         // this validator does not yet support partial validation, disable it to avoid incorrect results
         state.allow_partial = false.into();
 
         let iterator = input.validate_iter()?.into_static();
         let validator = self.item_validator.as_ref().map(|v| {
             InternalValidator::new(
-                py,
                 "ValidatorIterator",
                 v.clone(),
                 state,
@@ -89,7 +89,7 @@ impl Validator for GeneratorValidator {
             hide_input_in_errors: self.hide_input_in_errors,
             validation_error_cause: self.validation_error_cause,
         };
-        Ok(v_iterator.into_py(py))
+        Ok(v_iterator.into_py_any(py)?)
     }
 
     fn get_name(&self) -> &str {
@@ -114,7 +114,7 @@ impl ValidatorIterator {
         slf
     }
 
-    fn __next__(mut slf: PyRefMut<'_, Self>, py: Python) -> PyResult<Option<PyObject>> {
+    fn __next__(mut slf: PyRefMut<'_, Self>, py: Python) -> PyResult<Option<Py<PyAny>>> {
         let min_length = slf.min_length;
         let max_length = slf.max_length;
         let hide_input_in_errors = slf.hide_input_in_errors;
@@ -140,7 +140,7 @@ impl ValidatorIterator {
                                     );
                                     return Err(ValidationError::from_val_error(
                                         py,
-                                        "ValidatorIterator".to_object(py),
+                                        "ValidatorIterator".into_pyobject(py)?.into(),
                                         InputType::Python,
                                         val_error,
                                         None,
@@ -153,7 +153,7 @@ impl ValidatorIterator {
                                 .validate(py, next.borrow_input(), Some(index.into()))
                                 .map(Some)
                         }
-                        None => Ok(Some(next.to_object(py))),
+                        None => Ok(Some(next.into_pyobject(py)?.unbind())),
                     },
                     None => {
                         if let Some(min_length) = min_length {
@@ -169,7 +169,7 @@ impl ValidatorIterator {
                                 );
                                 return Err(ValidationError::from_val_error(
                                     py,
-                                    "ValidatorIterator".to_object(py),
+                                    "ValidatorIterator".into_pyobject(py)?.into(),
                                     InputType::Python,
                                     val_error,
                                     None,
@@ -221,11 +221,14 @@ pub struct InternalValidator {
     // TODO, do we need data?
     data: Option<Py<PyDict>>,
     strict: Option<bool>,
+    extra_behavior: Option<ExtraBehavior>,
     from_attributes: Option<bool>,
-    context: Option<PyObject>,
-    self_instance: Option<PyObject>,
+    context: Option<Py<PyAny>>,
+    field_name: Option<Py<PyString>>,
+    self_instance: Option<Py<PyAny>>,
     recursion_guard: RecursionState,
     pub(crate) exactness: Option<Exactness>,
+    pub(crate) fields_set_count: Option<usize>,
     validation_mode: InputType,
     hide_input_in_errors: bool,
     validation_error_cause: bool,
@@ -240,7 +243,6 @@ impl fmt::Debug for InternalValidator {
 
 impl InternalValidator {
     pub fn new(
-        py: Python,
         name: &str,
         validator: Arc<CombinedValidator>,
         state: &ValidationState,
@@ -253,11 +255,14 @@ impl InternalValidator {
             validator,
             data: extra.data.as_ref().map(|d| d.clone().into()),
             strict: extra.strict,
+            extra_behavior: extra.extra_behavior,
             from_attributes: extra.from_attributes,
-            context: extra.context.map(|d| d.into_py(py)),
-            self_instance: extra.self_instance.map(|d| d.into_py(py)),
+            context: extra.context.map(|d| d.clone().unbind()),
+            field_name: extra.field_name.as_ref().map(|d| d.clone().unbind()),
+            self_instance: extra.self_instance.map(|d| d.clone().unbind()),
             recursion_guard: state.recursion_guard.clone(),
             exactness: state.exactness,
+            fields_set_count: state.fields_set_count,
             validation_mode: extra.input_type,
             hide_input_in_errors,
             validation_error_cause,
@@ -272,15 +277,19 @@ impl InternalValidator {
         field_name: &str,
         field_value: &Bound<'py, PyAny>,
         outer_location: Option<LocItem>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let extra = Extra {
             input_type: self.validation_mode,
             data: self.data.as_ref().map(|data| data.bind(py).clone()),
             strict: self.strict,
+            extra_behavior: self.extra_behavior,
             from_attributes: self.from_attributes,
+            field_name: Some(PyString::new(py, field_name)),
             context: self.context.as_ref().map(|data| data.bind(py)),
             self_instance: self.self_instance.as_ref().map(|data| data.bind(py)),
             cache_str: self.cache_str,
+            by_alias: None,
+            by_name: None,
         };
         let mut state = ValidationState::new(extra, &mut self.recursion_guard, false.into());
         state.exactness = self.exactness;
@@ -290,7 +299,7 @@ impl InternalValidator {
             .map_err(|e| {
                 ValidationError::from_val_error(
                     py,
-                    self.name.to_object(py),
+                    PyString::new(py, &self.name).into(),
                     InputType::Python,
                     e,
                     outer_location,
@@ -307,22 +316,27 @@ impl InternalValidator {
         py: Python<'py>,
         input: &(impl Input<'py> + ?Sized),
         outer_location: Option<LocItem>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let extra = Extra {
             input_type: self.validation_mode,
             data: self.data.as_ref().map(|data| data.bind(py).clone()),
             strict: self.strict,
+            extra_behavior: self.extra_behavior,
             from_attributes: self.from_attributes,
+            field_name: self.field_name.as_ref().map(|d| d.bind(py).clone()),
             context: self.context.as_ref().map(|data| data.bind(py)),
             self_instance: self.self_instance.as_ref().map(|data| data.bind(py)),
             cache_str: self.cache_str,
+            by_alias: None,
+            by_name: None,
         };
         let mut state = ValidationState::new(extra, &mut self.recursion_guard, false.into());
         state.exactness = self.exactness;
+        state.fields_set_count = self.fields_set_count;
         let result = self.validator.validate(py, input, &mut state).map_err(|e| {
             ValidationError::from_val_error(
                 py,
-                self.name.to_object(py),
+                PyString::new(py, &self.name).into(),
                 InputType::Python,
                 e,
                 outer_location,
@@ -331,6 +345,7 @@ impl InternalValidator {
             )
         });
         self.exactness = state.exactness;
+        self.fields_set_count = state.fields_set_count;
         result
     }
 }

@@ -1,13 +1,14 @@
+use std::convert::Infallible;
 use std::fmt;
 
 use pyo3::exceptions::PyValueError;
-use pyo3::types::{PyDict, PyList};
-use pyo3::{intern, prelude::*};
+use pyo3::types::{PyDict, PyList, PyString};
+use pyo3::{intern, prelude::*, IntoPyObjectExt};
 
 use crate::errors::{ErrorTypeDefaults, InputValue, LocItem, ValError, ValResult};
 use crate::lookup_key::{LookupKey, LookupPath};
 use crate::tools::py_err;
-use crate::validators::ValBytesMode;
+use crate::validators::{TemporalUnitMode, ValBytesMode};
 
 use super::datetime::{EitherDate, EitherDateTime, EitherTime, EitherTimedelta};
 use super::return_enums::{EitherBytes, EitherComplex, EitherInt, EitherString};
@@ -20,13 +21,18 @@ pub enum InputType {
     String,
 }
 
-impl IntoPy<PyObject> for InputType {
-    fn into_py(self, py: Python<'_>) -> PyObject {
-        match self {
-            Self::Json => intern!(py, "json").into_py(py),
-            Self::Python => intern!(py, "python").into_py(py),
-            Self::String => intern!(py, "string").into_py(py),
-        }
+impl<'py> IntoPyObject<'py> for InputType {
+    type Target = PyString;
+    type Output = Borrowed<'py, 'py, PyString>;
+    type Error = Infallible;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Borrowed<'py, 'py, PyString>, Infallible> {
+        let text = match self {
+            Self::Json => intern!(py, "json"),
+            Self::Python => intern!(py, "python"),
+            Self::String => intern!(py, "string"),
+        };
+        Ok(text.as_borrowed())
     }
 }
 
@@ -49,7 +55,14 @@ pub type ValMatch<T> = ValResult<ValidationMatch<T>>;
 /// the convention is to either implement:
 /// * `strict_*` & `lax_*` if they have different behavior
 /// * or, `validate_*` and `strict_*` to just call `validate_*` if the behavior for strict and lax is the same
-pub trait Input<'py>: fmt::Debug + ToPyObject {
+pub trait Input<'py>: fmt::Debug {
+    fn py_converter(&self) -> impl IntoPyObject<'py> + '_;
+
+    #[inline]
+    fn to_object<'a>(&'a self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.py_converter().into_bound_py_any(py)
+    }
+
     fn as_error_value(&self) -> InputValue;
 
     fn is_none(&self) -> bool {
@@ -68,9 +81,11 @@ pub trait Input<'py>: fmt::Debug + ToPyObject {
 
     fn validate_args(&self) -> ValResult<Self::Arguments<'_>>;
 
+    fn validate_args_v3(&self) -> ValResult<Self::Arguments<'_>>;
+
     fn validate_dataclass_args<'a>(&'a self, dataclass_name: &str) -> ValResult<Self::Arguments<'a>>;
 
-    fn validate_str(&self, strict: bool, coerce_numbers_to_str: bool) -> ValMatch<EitherString<'_>>;
+    fn validate_str(&self, strict: bool, coerce_numbers_to_str: bool) -> ValMatch<EitherString<'_, 'py>>;
 
     fn validate_bytes<'a>(&'a self, strict: bool, mode: ValBytesMode) -> ValMatch<EitherBytes<'a, 'py>>;
 
@@ -88,7 +103,7 @@ pub trait Input<'py>: fmt::Debug + ToPyObject {
 
     /// Extract a String from the input, only allowing exact
     /// matches for a String (no subclasses)
-    fn exact_str(&self) -> ValResult<EitherString<'_>> {
+    fn exact_str(&self) -> ValResult<EitherString<'_, 'py>> {
         self.validate_str(true, false).and_then(|val_match| {
             val_match
                 .require_exact()
@@ -143,7 +158,7 @@ pub trait Input<'py>: fmt::Debug + ToPyObject {
 
     fn validate_iter(&self) -> ValResult<GenericIterator<'static>>;
 
-    fn validate_date(&self, strict: bool) -> ValMatch<EitherDate<'py>>;
+    fn validate_date(&self, strict: bool, mode: TemporalUnitMode) -> ValMatch<EitherDate<'py>>;
 
     fn validate_time(
         &self,
@@ -155,6 +170,7 @@ pub trait Input<'py>: fmt::Debug + ToPyObject {
         &self,
         strict: bool,
         microseconds_overflow_behavior: speedate::MicrosecondsPrecisionOverflowBehavior,
+        mode: TemporalUnitMode,
     ) -> ValMatch<EitherDateTime<'py>>;
 
     fn validate_timedelta(
@@ -203,7 +219,7 @@ pub trait KeywordArgs<'py> {
     type Key<'a>: BorrowInput<'py> + Clone + Into<LocItem>
     where
         Self: 'a;
-    type Item<'a>: BorrowInput<'py> + ToPyObject
+    type Item<'a>: BorrowInput<'py>
     where
         Self: 'a;
     fn len(&self) -> usize;
@@ -252,6 +268,7 @@ pub trait ValidatedList<'py> {
 pub trait ValidatedTuple<'py> {
     type Item: BorrowInput<'py>;
     fn len(&self) -> Option<usize>;
+    fn try_for_each(self, f: impl FnMut(PyResult<Self::Item>) -> ValResult<()>) -> ValResult<()>;
     fn iterate<R>(self, consumer: impl ConsumeIterator<PyResult<Self::Item>, Output = R>) -> ValResult<R>;
 }
 
@@ -298,6 +315,9 @@ impl<'py> ValidatedList<'py> for Never {
 impl<'py> ValidatedTuple<'py> for Never {
     type Item = Bound<'py, PyAny>;
     fn len(&self) -> Option<usize> {
+        unreachable!()
+    }
+    fn try_for_each(self, _f: impl FnMut(PyResult<Self::Item>) -> ValResult<()>) -> ValResult<()> {
         unreachable!()
     }
     fn iterate<R>(self, _consumer: impl ConsumeIterator<PyResult<Self::Item>, Output = R>) -> ValResult<R> {

@@ -1,19 +1,22 @@
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList, PyString};
 
 use ahash::AHashSet;
+use pyo3::IntoPyObjectExt;
 use serde::Serialize;
 
 use crate::build_tools::py_schema_err;
 use crate::definitions::DefinitionsBuilder;
+use crate::serializers::SerializationState;
 use crate::tools::{extract_i64, SchemaDict};
 
 use super::{
-    infer_json_key, infer_serialize, infer_to_python, py_err_se_err, BuildSerializer, CombinedSerializer, Extra,
-    SerMode, TypeSerializer,
+    infer_json_key, infer_serialize, infer_to_python, py_err_se_err, BuildSerializer, CombinedSerializer, SerMode,
+    TypeSerializer,
 };
 
 #[derive(Debug)]
@@ -30,8 +33,8 @@ impl BuildSerializer for LiteralSerializer {
     fn build(
         schema: &Bound<'_, PyDict>,
         _config: Option<&Bound<'_, PyDict>>,
-        _definitions: &mut DefinitionsBuilder<CombinedSerializer>,
-    ) -> PyResult<CombinedSerializer> {
+        _definitions: &mut DefinitionsBuilder<Arc<CombinedSerializer>>,
+    ) -> PyResult<Arc<CombinedSerializer>> {
         let expected: Bound<'_, PyList> = schema.get_as_req(intern!(schema.py(), "expected"))?;
 
         if expected.is_empty() {
@@ -40,7 +43,7 @@ impl BuildSerializer for LiteralSerializer {
         let mut expected_int = AHashSet::new();
         let mut expected_str = AHashSet::new();
         let py = expected.py();
-        let expected_py = PyList::empty_bound(py);
+        let expected_py = PyList::empty(py);
         let mut repr_args: Vec<String> = Vec::new();
         for item in expected {
             repr_args.push(item.repr()?.extract()?);
@@ -55,16 +58,18 @@ impl BuildSerializer for LiteralSerializer {
             }
         }
 
-        Ok(Self {
-            expected_int,
-            expected_str,
-            expected_py: match expected_py.is_empty() {
-                true => None,
-                false => Some(expected_py.into()),
-            },
-            name: format!("{}[{}]", Self::EXPECTED_TYPE, repr_args.join(",")),
-        }
-        .into())
+        Ok(Arc::new(
+            Self {
+                expected_int,
+                expected_str,
+                expected_py: match expected_py.is_empty() {
+                    true => None,
+                    false => Some(expected_py.into()),
+                },
+                name: format!("{}[{}]", Self::EXPECTED_TYPE, repr_args.join(",")),
+            }
+            .into(),
+        ))
     }
 }
 
@@ -76,8 +81,8 @@ enum OutputValue<'py> {
 }
 
 impl LiteralSerializer {
-    fn check<'py>(&self, value: &Bound<'py, PyAny>, extra: &Extra) -> PyResult<OutputValue<'py>> {
-        if extra.check.enabled() {
+    fn check<'py>(&self, value: &Bound<'py, PyAny>, state: &SerializationState<'_, 'py>) -> PyResult<OutputValue<'py>> {
+        if state.check.enabled() {
             if !self.expected_int.is_empty() && !value.is_instance_of::<PyBool>() {
                 if let Some(int) = extract_i64(value) {
                     if self.expected_int.contains(&int) {
@@ -89,7 +94,7 @@ impl LiteralSerializer {
                 if let Ok(py_str) = value.downcast::<PyString>() {
                     let s = py_str.to_str()?;
                     if self.expected_str.contains(s) {
-                        return Ok(OutputValue::OkStr(PyString::new_bound(value.py(), s)));
+                        return Ok(OutputValue::OkStr(PyString::new(value.py(), s)));
                     }
                 }
             }
@@ -109,58 +114,58 @@ impl LiteralSerializer {
 impl_py_gc_traverse!(LiteralSerializer { expected_py });
 
 impl TypeSerializer for LiteralSerializer {
-    fn to_python(
+    fn to_python<'py>(
         &self,
-        value: &Bound<'_, PyAny>,
-        include: Option<&Bound<'_, PyAny>>,
-        exclude: Option<&Bound<'_, PyAny>>,
-        extra: &Extra,
-    ) -> PyResult<PyObject> {
+        value: &Bound<'py, PyAny>,
+        state: &mut SerializationState<'_, 'py>,
+    ) -> PyResult<Py<PyAny>> {
         let py = value.py();
-        match self.check(value, extra)? {
-            OutputValue::OkInt(int) => match extra.mode {
-                SerMode::Json => Ok(int.to_object(py)),
-                _ => Ok(value.to_object(py)),
+        match self.check(value, state)? {
+            OutputValue::OkInt(int) => match state.extra.mode {
+                SerMode::Json => int.into_py_any(py),
+                _ => Ok(value.clone().unbind()),
             },
-            OutputValue::OkStr(s) => match extra.mode {
-                SerMode::Json => Ok(s.to_object(py)),
-                _ => Ok(value.to_object(py)),
+            OutputValue::OkStr(s) => match state.extra.mode {
+                SerMode::Json => Ok(s.into()),
+                _ => Ok(value.clone().unbind()),
             },
-            OutputValue::Ok => infer_to_python(value, include, exclude, extra),
+            OutputValue::Ok => infer_to_python(value, state),
             OutputValue::Fallback => {
-                extra.warnings.on_fallback_py(self.get_name(), value, extra)?;
-                infer_to_python(value, include, exclude, extra)
+                state.warn_fallback_py(self.get_name(), value)?;
+                infer_to_python(value, state)
             }
         }
     }
 
-    fn json_key<'a>(&self, key: &'a Bound<'_, PyAny>, extra: &Extra) -> PyResult<Cow<'a, str>> {
-        match self.check(key, extra)? {
+    fn json_key<'a, 'py>(
+        &self,
+        key: &'a Bound<'py, PyAny>,
+        state: &mut SerializationState<'_, 'py>,
+    ) -> PyResult<Cow<'a, str>> {
+        match self.check(key, state)? {
             OutputValue::OkInt(int) => Ok(Cow::Owned(int.to_string())),
             OutputValue::OkStr(s) => Ok(Cow::Owned(s.to_string_lossy().into_owned())),
-            OutputValue::Ok => infer_json_key(key, extra),
+            OutputValue::Ok => infer_json_key(key, state),
             OutputValue::Fallback => {
-                extra.warnings.on_fallback_py(self.get_name(), key, extra)?;
-                infer_json_key(key, extra)
+                state.warn_fallback_py(self.get_name(), key)?;
+                infer_json_key(key, state)
             }
         }
     }
 
-    fn serde_serialize<S: serde::ser::Serializer>(
+    fn serde_serialize<'py, S: serde::ser::Serializer>(
         &self,
-        value: &Bound<'_, PyAny>,
+        value: &Bound<'py, PyAny>,
         serializer: S,
-        include: Option<&Bound<'_, PyAny>>,
-        exclude: Option<&Bound<'_, PyAny>>,
-        extra: &Extra,
+        state: &mut SerializationState<'_, 'py>,
     ) -> Result<S::Ok, S::Error> {
-        match self.check(value, extra).map_err(py_err_se_err)? {
+        match self.check(value, state).map_err(py_err_se_err)? {
             OutputValue::OkInt(int) => int.serialize(serializer),
             OutputValue::OkStr(s) => s.to_string_lossy().serialize(serializer),
-            OutputValue::Ok => infer_serialize(value, serializer, include, exclude, extra),
+            OutputValue::Ok => infer_serialize(value, serializer, state),
             OutputValue::Fallback => {
-                extra.warnings.on_fallback_ser::<S>(self.get_name(), value, extra)?;
-                infer_serialize(value, serializer, include, exclude, extra)
+                state.warn_fallback_ser::<S>(self.get_name(), value)?;
+                infer_serialize(value, serializer, state)
             }
         }
     }
