@@ -42,7 +42,7 @@ Build-Depends:
  python3-pytest <!nocheck>,
  python3-pytest-benchmark <!nocheck>,
  python3-pytest-mock <!nocheck>,
- python3-pytest-run-parallel <!nocheck>,
+#  python3-pytest-run-parallel <!nocheck>,
  python3-pytest-timeout <!nocheck>,
  python3-typing-extensions (>= 4.14.1),
  python3-typing-inspection <!nocheck>,
