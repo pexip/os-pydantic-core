@@ -1,3 +1,12 @@
+pydantic-core (2.41.5-2) unstable; urgency=medium
+
+  [ Peter Michael Green ]
+  * Apply upstream patch for pyo3 0.27 and jiter 0.12 (closes: #1121035)
+  * Update build-depends for pyo3 0.27 and jiter 0.12
+  * Add missing build-depends for pyo3-build-config crate
+
+ -- Colin Watson <cjwatson@debian.org>  Thu, 20 Nov 2025 10:18:39 +0000
+
 pydantic-core (2.41.5-1) unstable; urgency=medium
 
   * New upstream release.

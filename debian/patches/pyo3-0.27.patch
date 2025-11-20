@@ -1,0 +1,2281 @@
+From: David Hewitt <david.hewitt@pydantic.dev>
+Date: Thu, 20 Nov 2025 10:05:35 +0000
+Subject: Update to PyO3 0.27
+
+Author: Peter Michael Green <plugwash@debian.org>
+Origin: backport, https://github.com/pydantic/pydantic/pull/12502
+Bug-Debian: https://bugs.debian.org/1121035
+Last-Update: 2025-11-20
+---
+ Cargo.toml                                        |   8 +-
+ src/build_tools.rs                                |   6 +-
+ src/errors/line_error.rs                          |  12 +--
+ src/errors/location.rs                            |   4 +-
+ src/errors/types.rs                               |  19 ++--
+ src/errors/validation_exception.rs                |   4 +-
+ src/errors/value_exception.rs                     |   4 +-
+ src/input/datetime.rs                             |   6 +-
+ src/input/input_python.rs                         | 108 +++++++++++-----------
+ src/input/input_string.rs                         |   6 +-
+ src/input/return_enums.rs                         |  18 ++--
+ src/lookup_key.rs                                 |  16 ++--
+ src/serializers/computed_fields.rs                |   2 +-
+ src/serializers/config.rs                         |   7 +-
+ src/serializers/extra.rs                          |   7 +-
+ src/serializers/fields.rs                         |   4 +-
+ src/serializers/filter.rs                         |  26 +++---
+ src/serializers/infer.rs                          |  75 ++++++++-------
+ src/serializers/mod.rs                            |   2 +-
+ src/serializers/ob_type.rs                        |   2 +-
+ src/serializers/shared.rs                         |   4 +-
+ src/serializers/type_serializers/bytes.rs         |   6 +-
+ src/serializers/type_serializers/complex.rs       |   4 +-
+ src/serializers/type_serializers/dataclass.rs     |   4 +-
+ src/serializers/type_serializers/datetime_etc.rs  |   6 +-
+ src/serializers/type_serializers/definitions.rs   |   2 +-
+ src/serializers/type_serializers/dict.rs          |   4 +-
+ src/serializers/type_serializers/format.rs        |   4 +-
+ src/serializers/type_serializers/generator.rs     |   4 +-
+ src/serializers/type_serializers/list.rs          |   4 +-
+ src/serializers/type_serializers/literal.rs       |   6 +-
+ src/serializers/type_serializers/model.rs         |   8 +-
+ src/serializers/type_serializers/other.rs         |   2 +-
+ src/serializers/type_serializers/set_frozenset.rs |   4 +-
+ src/serializers/type_serializers/string.rs        |   6 +-
+ src/serializers/type_serializers/tuple.rs         |  10 +-
+ src/serializers/type_serializers/typed_dict.rs    |   4 +-
+ src/serializers/type_serializers/union.rs         |   8 +-
+ src/tools.rs                                      |  27 ++----
+ src/url.rs                                        |  11 ++-
+ src/validators/arguments.rs                       |   4 +-
+ src/validators/arguments_v3.rs                    |   8 +-
+ src/validators/call.rs                            |   2 +-
+ src/validators/complex.rs                         |   2 +-
+ src/validators/dataclass.rs                       |   8 +-
+ src/validators/datetime.rs                        |   2 +-
+ src/validators/is_instance.rs                     |   2 +-
+ src/validators/is_subclass.rs                     |   2 +-
+ src/validators/mod.rs                             |   2 +-
+ src/validators/model.rs                           |  10 +-
+ src/validators/model_fields.rs                    |   6 +-
+ src/validators/typed_dict.rs                      |   4 +-
+ src/validators/union.rs                           |   2 +-
+ src/validators/uuid.rs                            |   8 +-
+ tests/test.rs                                     |   2 +-
+ tests/test_errors.py                              |   6 +-
+ tests/validators/test_is_subclass.py              |   2 +-
+ tests/validators/test_model.py                    |   2 +-
+ tests/validators/test_model_fields.py             |   2 +-
+ tests/validators/test_string.py                   |   2 +-
+ tests/validators/test_typed_dict.py               |   2 +-
+ 61 files changed, 267 insertions(+), 277 deletions(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index bc3e291..b726b6e 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -27,7 +27,7 @@ rust-version = "1.75"
+ [dependencies]
+ # TODO it would be very nice to remove the "py-clone" feature as it can panic,
+ # but needs a bit of work to make sure it's not used in the codebase
+-pyo3 = { version = "0.26", features = ["num-bigint", "py-clone"] }
++pyo3 = { version = "0.27", features = ["num-bigint", "py-clone"] }
+ regex = "1.12.2"
+ strum = { version = "0.26", features = ["derive"] }
+ strum_macros = "0.26"
+@@ -44,7 +44,7 @@ base64 = "0.22.1"
+ num-bigint = "0.4.6"
+ num-traits = "0.2.19"
+ uuid = "1.18.1"
+-jiter = { version = "0.11.1", features = ["python"] }
++jiter = { version = "0.12.0", features = ["python"] }
+ hex = "0.4.3"
+ percent-encoding = "2.3.1"
+ 
+@@ -69,12 +69,12 @@ debug = true
+ strip = false
+ 
+ [dev-dependencies]
+-pyo3 = { version = "0.26", features = ["auto-initialize"] }
++pyo3 = { version = "0.27", features = ["auto-initialize"] }
+ 
+ [build-dependencies]
+ version_check = "0.9.5"
+ # used where logic has to be version/distribution specific, e.g. pypy
+-pyo3-build-config = { version = "0.26" }
++pyo3-build-config = { version = "0.27" }
+ 
+ [lints.clippy]
+ dbg_macro = "warn"
+diff --git a/src/build_tools.rs b/src/build_tools.rs
+index 2ccb827..01a4c10 100644
+--- a/src/build_tools.rs
++++ b/src/build_tools.rs
+@@ -7,7 +7,7 @@ use std::sync::OnceLock;
+ use pyo3::exceptions::PyException;
+ use pyo3::prelude::*;
+ use pyo3::types::{PyDict, PyList, PyString};
+-use pyo3::{intern, FromPyObject, PyErrArguments};
++use pyo3::{intern, PyErrArguments};
+ 
+ use crate::errors::{PyLineError, ValError};
+ use crate::input::InputType;
+@@ -21,7 +21,7 @@ pub fn schema_or_config<'py, T>(
+     config_key: &Bound<'py, PyString>,
+ ) -> PyResult<Option<T>>
+ where
+-    T: FromPyObject<'py>,
++    T: FromPyObjectOwned<'py>,
+ {
+     match schema.get_as(schema_key)? {
+         Some(v) => Ok(Some(v)),
+@@ -38,7 +38,7 @@ pub fn schema_or_config_same<'py, T>(
+     key: &Bound<'py, PyString>,
+ ) -> PyResult<Option<T>>
+ where
+-    T: FromPyObject<'py>,
++    T: FromPyObjectOwned<'py>,
+ {
+     schema_or_config(schema, config, key, key)
+ }
+diff --git a/src/errors/line_error.rs b/src/errors/line_error.rs
+index 346226b..202b45f 100644
+--- a/src/errors/line_error.rs
++++ b/src/errors/line_error.rs
+@@ -2,8 +2,8 @@ use std::convert::Infallible;
+ 
+ use pyo3::exceptions::PyTypeError;
+ use pyo3::prelude::*;
+-use pyo3::DowncastError;
+-use pyo3::DowncastIntoError;
++use pyo3::CastError;
++use pyo3::CastIntoError;
+ 
+ use jiter::JsonValue;
+ 
+@@ -45,14 +45,14 @@ impl From<PyErr> for ValError {
+     }
+ }
+ 
+-impl From<DowncastError<'_, '_>> for ValError {
+-    fn from(py_downcast: DowncastError) -> Self {
++impl From<CastError<'_, '_>> for ValError {
++    fn from(py_downcast: CastError) -> Self {
+         Self::InternalErr(PyTypeError::new_err(py_downcast.to_string()))
+     }
+ }
+ 
+-impl From<DowncastIntoError<'_>> for ValError {
+-    fn from(py_downcast: DowncastIntoError) -> Self {
++impl From<CastIntoError<'_>> for ValError {
++    fn from(py_downcast: CastIntoError) -> Self {
+         Self::InternalErr(PyTypeError::new_err(py_downcast.to_string()))
+     }
+ }
+diff --git a/src/errors/location.rs b/src/errors/location.rs
+index 24654ba..3e8fd9a 100644
+--- a/src/errors/location.rs
++++ b/src/errors/location.rs
+@@ -171,9 +171,9 @@ impl TryFrom<Option<&Bound<'_, PyAny>>> for Location {
+     /// Thus this expects the location to *not* be reversed and reverses it before storing it.
+     fn try_from(location: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+         if let Some(location) = location {
+-            let mut loc_vec: Vec<LocItem> = if let Ok(tuple) = location.downcast::<PyTuple>() {
++            let mut loc_vec: Vec<LocItem> = if let Ok(tuple) = location.cast::<PyTuple>() {
+                 tuple.iter().map(Into::into).collect()
+-            } else if let Ok(list) = location.downcast::<PyList>() {
++            } else if let Ok(list) = location.cast::<PyList>() {
+                 list.iter().map(Into::into).collect()
+             } else {
+                 return Err(PyTypeError::new_err(
+diff --git a/src/errors/types.rs b/src/errors/types.rs
+index 1b821e2..ccb8276 100644
+--- a/src/errors/types.rs
++++ b/src/errors/types.rs
+@@ -13,7 +13,7 @@ use strum::{Display, EnumMessage, IntoEnumIterator};
+ use strum_macros::EnumIter;
+ 
+ use crate::input::{InputType, Int};
+-use crate::tools::{extract_i64, py_err, py_error_type};
++use crate::tools::{py_err, py_error_type};
+ 
+ use super::PydanticCustomError;
+ 
+@@ -42,7 +42,7 @@ pub fn list_all_errors(py: Python<'_>) -> PyResult<Bound<'_, PyList>> {
+     PyList::new(py, errors)
+ }
+ 
+-fn field_from_context<'py, T: FromPyObject<'py>>(
++fn field_from_context<'py, T: FromPyObjectOwned<'py>>(
+     context: Option<&Bound<'py, PyDict>>,
+     field_name: &str,
+     enum_name: &str,
+@@ -56,7 +56,7 @@ fn field_from_context<'py, T: FromPyObject<'py>>(
+         .map_err(|_| py_error_type!(PyTypeError; "{}: '{}' context value must be a {}", enum_name, field_name, type_name_fn()))
+ }
+ 
+-fn cow_field_from_context<'py, T: FromPyObject<'py>, B: ToOwned<Owned = T> + ?Sized + 'static>(
++fn cow_field_from_context<'py, T: FromPyObjectOwned<'py>, B: ToOwned<Owned = T> + ?Sized + 'static>(
+     context: Option<&Bound<'py, PyDict>>,
+     field_name: &str,
+     enum_name: &str,
+@@ -127,7 +127,7 @@ macro_rules! error_types {
+                                 dict.set_item(stringify!($key), $key)?;
+                             )*
+                             if let Some(ctx) = context {
+-                                dict.update(ctx.bind(py).downcast::<PyMapping>()?)?;
++                                dict.update(ctx.bind(py).cast::<PyMapping>()?)?;
+                                 Ok(true)
+                             } else {
+                                 Ok(false)
+@@ -799,13 +799,14 @@ impl From<Int> for Number {
+     }
+ }
+ 
+-impl FromPyObject<'_> for Number {
+-    fn extract_bound(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
+-        if let Some(int) = extract_i64(obj) {
++impl FromPyObject<'_, '_> for Number {
++    type Error = PyErr;
++    fn extract(obj: Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
++        if let Ok(int) = obj.extract() {
+             Ok(Number::Int(int))
+-        } else if let Ok(float) = obj.extract::<f64>() {
++        } else if let Ok(float) = obj.extract() {
+             Ok(Number::Float(float))
+-        } else if let Ok(string) = obj.extract::<String>() {
++        } else if let Ok(string) = obj.extract() {
+             Ok(Number::String(string))
+         } else {
+             py_err!(PyTypeError; "Expected int or float or String, got {}", obj.get_type())
+diff --git a/src/errors/validation_exception.rs b/src/errors/validation_exception.rs
+index 5216acc..e4a24b3 100644
+--- a/src/errors/validation_exception.rs
++++ b/src/errors/validation_exception.rs
+@@ -445,14 +445,14 @@ impl TryFrom<&Bound<'_, PyAny>> for PyLineError {
+     type Error = PyErr;
+ 
+     fn try_from(value: &Bound<'_, PyAny>) -> PyResult<Self> {
+-        let dict = value.downcast::<PyDict>()?;
++        let dict = value.cast::<PyDict>()?;
+         let py = value.py();
+ 
+         let type_raw = dict
+             .get_item(intern!(py, "type"))?
+             .ok_or_else(|| PyKeyError::new_err("type"))?;
+ 
+-        let error_type = if let Ok(type_str) = type_raw.downcast::<PyString>() {
++        let error_type = if let Ok(type_str) = type_raw.cast::<PyString>() {
+             let context: Option<Bound<'_, PyDict>> = dict.get_as(intern!(py, "ctx"))?;
+             ErrorType::new(py, type_str.to_str()?, context)?
+         } else if let Ok(custom_error) = type_raw.extract::<PydanticCustomError>() {
+diff --git a/src/errors/value_exception.rs b/src/errors/value_exception.rs
+index 9648999..743e7f3 100644
+--- a/src/errors/value_exception.rs
++++ b/src/errors/value_exception.rs
+@@ -120,8 +120,8 @@ impl PydanticCustomError {
+         let mut message = message_template.to_string();
+         if let Some(ctx) = context {
+             for (key, value) in ctx.iter() {
+-                let key = key.downcast::<PyString>()?;
+-                if let Ok(py_str) = value.downcast::<PyString>() {
++                let key = key.cast::<PyString>()?;
++                if let Ok(py_str) = value.cast::<PyString>() {
+                     message = message.replace(&format!("{{{}}}", key.to_str()?), py_str.to_str()?);
+                 } else if let Some(value_int) = extract_i64(&value) {
+                     message = message.replace(&format!("{{{}}}", key.to_str()?), &value_int.to_string());
+diff --git a/src/input/datetime.rs b/src/input/datetime.rs
+index 3be2c8b..7086d73 100644
+--- a/src/input/datetime.rs
++++ b/src/input/datetime.rs
+@@ -225,10 +225,10 @@ impl<'py> TryFrom<&'_ Bound<'py, PyAny>> for EitherTimedelta<'py> {
+     type Error = PyErr;
+ 
+     fn try_from(value: &Bound<'py, PyAny>) -> PyResult<Self> {
+-        if let Ok(dt) = value.downcast_exact() {
++        if let Ok(dt) = value.cast_exact() {
+             Ok(EitherTimedelta::PyExact(dt.clone()))
+         } else {
+-            let dt = value.downcast()?;
++            let dt = value.cast()?;
+             Ok(EitherTimedelta::PySubclass(dt.clone()))
+         }
+     }
+@@ -343,7 +343,7 @@ fn time_as_tzinfo<'py>(py: Python<'py>, time: &Time) -> PyResult<Option<Bound<'p
+     match time.tz_offset {
+         Some(offset) => {
+             let tz_info: TzInfo = offset.try_into()?;
+-            Ok(Some(Bound::new(py, tz_info)?.into_any().downcast_into()?))
++            Ok(Some(Bound::new(py, tz_info)?.into_any().cast_into()?))
+         }
+         None => Ok(None),
+     }
+diff --git a/src/input/input_python.rs b/src/input/input_python.rs
+index d3a26bf..7707c9a 100644
+--- a/src/input/input_python.rs
++++ b/src/input/input_python.rs
+@@ -63,7 +63,7 @@ pub fn get_fraction_type(py: Python<'_>) -> &Bound<'_, PyType> {
+ }
+ 
+ pub(crate) fn downcast_python_input<'py, T: PyTypeCheck>(input: &(impl Input<'py> + ?Sized)) -> Option<&Bound<'py, T>> {
+-    input.as_python().and_then(|any| any.downcast::<T>().ok())
++    input.as_python().and_then(|any| any.cast::<T>().ok())
+ }
+ 
+ pub(crate) fn input_as_python_instance<'a, 'py>(
+@@ -75,7 +75,7 @@ pub(crate) fn input_as_python_instance<'a, 'py>(
+ 
+ impl From<&Bound<'_, PyAny>> for LocItem {
+     fn from(py_any: &Bound<'_, PyAny>) -> Self {
+-        if let Ok(py_str) = py_any.downcast::<PyString>() {
++        if let Ok(py_str) = py_any.cast::<PyString>() {
+             py_str.to_string_lossy().as_ref().into()
+         } else if let Some(key_int) = extract_i64(py_any) {
+             key_int.into()
+@@ -110,7 +110,7 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+     }
+ 
+     fn as_kwargs(&self, _py: Python<'py>) -> Option<Bound<'py, PyDict>> {
+-        self.downcast::<PyDict>().ok().map(Bound::to_owned)
++        self.cast::<PyDict>().ok().map(Bound::to_owned)
+     }
+ 
+     type Arguments<'a>
+@@ -119,15 +119,15 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+         Self: 'a;
+ 
+     fn validate_args(&self) -> ValResult<PyArgs<'py>> {
+-        if let Ok(dict) = self.downcast::<PyDict>() {
++        if let Ok(dict) = self.cast::<PyDict>() {
+             Ok(PyArgs::new(None, Some(dict.clone())))
+         } else if let Ok(args_kwargs) = self.extract::<ArgsKwargs>() {
+             let args = args_kwargs.args.into_bound(self.py());
+             let kwargs = args_kwargs.kwargs.map(|d| d.into_bound(self.py()));
+             Ok(PyArgs::new(Some(args), kwargs))
+-        } else if let Ok(tuple) = self.downcast::<PyTuple>() {
++        } else if let Ok(tuple) = self.cast::<PyTuple>() {
+             Ok(PyArgs::new(Some(tuple.clone()), None))
+-        } else if let Ok(list) = self.downcast::<PyList>() {
++        } else if let Ok(list) = self.cast::<PyList>() {
+             Ok(PyArgs::new(Some(list.to_tuple()), None))
+         } else {
+             Err(ValError::new(ErrorTypeDefaults::ArgumentsType, self))
+@@ -145,7 +145,7 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+     }
+ 
+     fn validate_dataclass_args<'a>(&'a self, class_name: &str) -> ValResult<PyArgs<'py>> {
+-        if let Ok(dict) = self.downcast::<PyDict>() {
++        if let Ok(dict) = self.cast::<PyDict>() {
+             Ok(PyArgs::new(None, Some(dict.clone())))
+         } else if let Ok(args_kwargs) = self.extract::<ArgsKwargs>() {
+             let args = args_kwargs.args.into_bound(self.py());
+@@ -168,9 +168,9 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+         strict: bool,
+         coerce_numbers_to_str: bool,
+     ) -> ValResult<ValidationMatch<EitherString<'_, 'py>>> {
+-        if let Ok(py_str) = self.downcast_exact::<PyString>() {
++        if let Ok(py_str) = self.cast_exact::<PyString>() {
+             return Ok(ValidationMatch::exact(py_str.clone().into()));
+-        } else if let Ok(py_str) = self.downcast::<PyString>() {
++        } else if let Ok(py_str) = self.cast::<PyString>() {
+             // force to a rust string to make sure behavior is consistent whether or not we go via a
+             // rust string in StrConstrainedValidator - e.g. to_lower
+             return Ok(ValidationMatch::strict(py_string_str(py_str)?.into()));
+@@ -178,12 +178,12 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+ 
+         'lax: {
+             if !strict {
+-                return if let Ok(bytes) = self.downcast::<PyBytes>() {
++                return if let Ok(bytes) = self.cast::<PyBytes>() {
+                     match from_utf8(bytes.as_bytes()) {
+                         Ok(str) => Ok(str.into()),
+                         Err(_) => Err(ValError::new(ErrorTypeDefaults::StringUnicode, self)),
+                     }
+-                } else if let Ok(py_byte_array) = self.downcast::<PyByteArray>() {
++                } else if let Ok(py_byte_array) = self.cast::<PyByteArray>() {
+                     match bytearray_to_str(py_byte_array) {
+                         Ok(py_str) => Ok(py_str.into()),
+                         Err(_) => Err(ValError::new(ErrorTypeDefaults::StringUnicode, self)),
+@@ -215,21 +215,21 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+         strict: bool,
+         mode: ValBytesMode,
+     ) -> ValResult<ValidationMatch<EitherBytes<'a, 'py>>> {
+-        if let Ok(py_bytes) = self.downcast_exact::<PyBytes>() {
++        if let Ok(py_bytes) = self.cast_exact::<PyBytes>() {
+             return Ok(ValidationMatch::exact(py_bytes.into()));
+-        } else if let Ok(py_bytes) = self.downcast::<PyBytes>() {
++        } else if let Ok(py_bytes) = self.cast::<PyBytes>() {
+             return Ok(ValidationMatch::strict(py_bytes.into()));
+         }
+ 
+         'lax: {
+             if !strict {
+-                return if let Ok(py_str) = self.downcast::<PyString>() {
++                return if let Ok(py_str) = self.cast::<PyString>() {
+                     let str = py_string_str(py_str)?;
+                     match mode.deserialize_string(str) {
+                         Ok(b) => Ok(b),
+                         Err(e) => Err(ValError::new(e, self)),
+                     }
+-                } else if let Ok(py_byte_array) = self.downcast::<PyByteArray>() {
++                } else if let Ok(py_byte_array) = self.cast::<PyByteArray>() {
+                     Ok(py_byte_array.to_vec().into())
+                 } else {
+                     break 'lax;
+@@ -242,7 +242,7 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+     }
+ 
+     fn validate_bool(&self, strict: bool) -> ValResult<ValidationMatch<bool>> {
+-        if let Ok(bool) = self.downcast::<PyBool>() {
++        if let Ok(bool) = self.cast::<PyBool>() {
+             return Ok(ValidationMatch::exact(bool.is_true()));
+         }
+ 
+@@ -315,7 +315,7 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+     }
+ 
+     fn exact_str(&self) -> ValResult<EitherString<'_, 'py>> {
+-        if let Ok(py_str) = self.downcast_exact() {
++        if let Ok(py_str) = self.cast_exact() {
+             Ok(EitherString::Py(py_str.clone()))
+         } else {
+             Err(ValError::new(ErrorTypeDefaults::IntType, self))
+@@ -323,7 +323,7 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+     }
+ 
+     fn validate_float(&self, strict: bool) -> ValResult<ValidationMatch<EitherFloat<'_>>> {
+-        if let Ok(float) = self.downcast_exact::<PyFloat>() {
++        if let Ok(float) = self.cast_exact::<PyFloat>() {
+             return Ok(ValidationMatch::exact(EitherFloat::Py(float.clone())));
+         }
+ 
+@@ -395,19 +395,19 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+         Self: 'a;
+ 
+     fn strict_dict<'a>(&'a self) -> ValResult<GenericPyMapping<'a, 'py>> {
+-        if let Ok(dict) = self.downcast_exact::<PyDict>() {
++        if let Ok(dict) = self.cast_exact::<PyDict>() {
+             Ok(GenericPyMapping::Dict(dict))
+         } else if self.is_instance_of::<PyDict>() {
+-            Ok(GenericPyMapping::Mapping(self.downcast::<PyMapping>()?))
++            Ok(GenericPyMapping::Mapping(self.cast::<PyMapping>()?))
+         } else {
+             Err(ValError::new(ErrorTypeDefaults::DictType, self))
+         }
+     }
+ 
+     fn lax_dict<'a>(&'a self) -> ValResult<GenericPyMapping<'a, 'py>> {
+-        if let Ok(dict) = self.downcast_exact::<PyDict>() {
++        if let Ok(dict) = self.cast_exact::<PyDict>() {
+             Ok(GenericPyMapping::Dict(dict))
+-        } else if let Ok(mapping) = self.downcast::<PyMapping>() {
++        } else if let Ok(mapping) = self.cast::<PyMapping>() {
+             Ok(GenericPyMapping::Mapping(mapping))
+         } else {
+             Err(ValError::new(ErrorTypeDefaults::DictType, self))
+@@ -421,10 +421,10 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+     ) -> ValResult<GenericPyMapping<'a, 'py>> {
+         if from_attributes {
+             // if from_attributes, first try a dict, then mapping then from_attributes
+-            if let Ok(dict) = self.downcast::<PyDict>() {
++            if let Ok(dict) = self.cast::<PyDict>() {
+                 return Ok(GenericPyMapping::Dict(dict));
+             } else if !strict {
+-                if let Ok(mapping) = self.downcast::<PyMapping>() {
++                if let Ok(mapping) = self.cast::<PyMapping>() {
+                     return Ok(GenericPyMapping::Mapping(mapping));
+                 }
+             }
+@@ -454,7 +454,7 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+         Self: 'a;
+ 
+     fn validate_list<'a>(&'a self, strict: bool) -> ValMatch<PySequenceIterable<'a, 'py>> {
+-        if let Ok(list) = self.downcast::<PyList>() {
++        if let Ok(list) = self.cast::<PyList>() {
+             return Ok(ValidationMatch::exact(PySequenceIterable::List(list)));
+         } else if !strict {
+             if let Ok(other) = extract_sequence_iterable(self) {
+@@ -471,7 +471,7 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+         Self: 'a;
+ 
+     fn validate_tuple<'a>(&'a self, strict: bool) -> ValMatch<PySequenceIterable<'a, 'py>> {
+-        if let Ok(tup) = self.downcast::<PyTuple>() {
++        if let Ok(tup) = self.cast::<PyTuple>() {
+             return Ok(ValidationMatch::exact(PySequenceIterable::Tuple(tup)));
+         } else if !strict {
+             if let Ok(other) = extract_sequence_iterable(self) {
+@@ -488,7 +488,7 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+         Self: 'a;
+ 
+     fn validate_set<'a>(&'a self, strict: bool) -> ValMatch<PySequenceIterable<'a, 'py>> {
+-        if let Ok(set) = self.downcast::<PySet>() {
++        if let Ok(set) = self.cast::<PySet>() {
+             return Ok(ValidationMatch::exact(PySequenceIterable::Set(set)));
+         } else if !strict {
+             if let Ok(other) = extract_sequence_iterable(self) {
+@@ -500,7 +500,7 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+     }
+ 
+     fn validate_frozenset<'a>(&'a self, strict: bool) -> ValMatch<PySequenceIterable<'a, 'py>> {
+-        if let Ok(frozenset) = self.downcast::<PyFrozenSet>() {
++        if let Ok(frozenset) = self.cast::<PyFrozenSet>() {
+             return Ok(ValidationMatch::exact(PySequenceIterable::FrozenSet(frozenset)));
+         } else if !strict {
+             if let Ok(other) = extract_sequence_iterable(self) {
+@@ -520,21 +520,21 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+     }
+ 
+     fn validate_date(&self, strict: bool, mode: TemporalUnitMode) -> ValResult<ValidationMatch<EitherDate<'py>>> {
+-        if let Ok(date) = self.downcast_exact::<PyDate>() {
++        if let Ok(date) = self.cast_exact::<PyDate>() {
+             Ok(ValidationMatch::exact(date.clone().into()))
+         } else if self.is_instance_of::<PyDateTime>() {
+             // have to check if it's a datetime first, otherwise the line below converts to a date
+             // even if we later try coercion from a datetime, we don't want to return a datetime now
+             Err(ValError::new(ErrorTypeDefaults::DateType, self))
+-        } else if let Ok(date) = self.downcast::<PyDate>() {
++        } else if let Ok(date) = self.cast::<PyDate>() {
+             Ok(ValidationMatch::strict(date.clone().into()))
+         } else if let Some(bytes) = {
+             if strict {
+                 None
+-            } else if let Ok(py_str) = self.downcast::<PyString>() {
++            } else if let Ok(py_str) = self.cast::<PyString>() {
+                 let str = py_string_str(py_str)?;
+                 Some(str.as_bytes())
+-            } else if let Ok(py_bytes) = self.downcast::<PyBytes>() {
++            } else if let Ok(py_bytes) = self.cast::<PyBytes>() {
+                 Some(py_bytes.as_bytes())
+             } else {
+                 None
+@@ -551,18 +551,18 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+         strict: bool,
+         microseconds_overflow_behavior: MicrosecondsPrecisionOverflowBehavior,
+     ) -> ValResult<ValidationMatch<EitherTime<'py>>> {
+-        if let Ok(time) = self.downcast_exact::<PyTime>() {
++        if let Ok(time) = self.cast_exact::<PyTime>() {
+             return Ok(ValidationMatch::exact(time.clone().into()));
+-        } else if let Ok(time) = self.downcast::<PyTime>() {
++        } else if let Ok(time) = self.cast::<PyTime>() {
+             return Ok(ValidationMatch::strict(time.clone().into()));
+         }
+ 
+         'lax: {
+             if !strict {
+-                return if let Ok(py_str) = self.downcast::<PyString>() {
++                return if let Ok(py_str) = self.cast::<PyString>() {
+                     let str = py_string_str(py_str)?;
+                     bytes_as_time(self, str.as_bytes(), microseconds_overflow_behavior)
+-                } else if let Ok(py_bytes) = self.downcast::<PyBytes>() {
++                } else if let Ok(py_bytes) = self.cast::<PyBytes>() {
+                     bytes_as_time(self, py_bytes.as_bytes(), microseconds_overflow_behavior)
+                 } else if self.is_exact_instance_of::<PyBool>() {
+                     Err(ValError::new(ErrorTypeDefaults::TimeType, self))
+@@ -586,18 +586,18 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+         microseconds_overflow_behavior: MicrosecondsPrecisionOverflowBehavior,
+         mode: TemporalUnitMode,
+     ) -> ValResult<ValidationMatch<EitherDateTime<'py>>> {
+-        if let Ok(dt) = self.downcast_exact::<PyDateTime>() {
++        if let Ok(dt) = self.cast_exact::<PyDateTime>() {
+             return Ok(ValidationMatch::exact(dt.clone().into()));
+-        } else if let Ok(dt) = self.downcast::<PyDateTime>() {
++        } else if let Ok(dt) = self.cast::<PyDateTime>() {
+             return Ok(ValidationMatch::strict(dt.clone().into()));
+         }
+ 
+         'lax: {
+             if !strict {
+-                return if let Ok(py_str) = self.downcast::<PyString>() {
++                return if let Ok(py_str) = self.cast::<PyString>() {
+                     let str = py_string_str(py_str)?;
+                     bytes_as_datetime(self, str.as_bytes(), microseconds_overflow_behavior, mode)
+-                } else if let Ok(py_bytes) = self.downcast::<PyBytes>() {
++                } else if let Ok(py_bytes) = self.cast::<PyBytes>() {
+                     bytes_as_datetime(self, py_bytes.as_bytes(), microseconds_overflow_behavior, mode)
+                 } else if self.is_exact_instance_of::<PyBool>() {
+                     Err(ValError::new(ErrorTypeDefaults::DatetimeType, self))
+@@ -605,7 +605,7 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+                     int_as_datetime(self, int, 0, mode)
+                 } else if let Ok(float) = self.extract::<f64>() {
+                     float_as_datetime(self, float, mode)
+-                } else if let Ok(date) = self.downcast::<PyDate>() {
++                } else if let Ok(date) = self.cast::<PyDate>() {
+                     Ok(date_as_datetime(date)?)
+                 } else {
+                     break 'lax;
+@@ -633,10 +633,10 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+ 
+         'lax: {
+             if !strict {
+-                return if let Ok(py_str) = self.downcast::<PyString>() {
++                return if let Ok(py_str) = self.cast::<PyString>() {
+                     let str = py_string_str(py_str)?;
+                     bytes_as_timedelta(self, str.as_bytes(), microseconds_overflow_behavior)
+-                } else if let Ok(py_bytes) = self.downcast::<PyBytes>() {
++                } else if let Ok(py_bytes) = self.cast::<PyBytes>() {
+                     bytes_as_timedelta(self, py_bytes.as_bytes(), microseconds_overflow_behavior)
+                 } else if let Some(int) = extract_i64(self) {
+                     Ok(int_as_duration(self, int)?.into())
+@@ -653,7 +653,7 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+     }
+ 
+     fn validate_complex<'a>(&'a self, strict: bool, py: Python<'py>) -> ValResult<ValidationMatch<EitherComplex<'py>>> {
+-        if let Ok(complex) = self.downcast::<PyComplex>() {
++        if let Ok(complex) = self.cast::<PyComplex>() {
+             return Ok(ValidationMatch::strict(EitherComplex::Py(complex.to_owned())));
+         }
+         if strict {
+@@ -669,7 +669,7 @@ impl<'py> Input<'py> for Bound<'py, PyAny> {
+             ));
+         }
+ 
+-        if let Ok(s) = self.downcast::<PyString>() {
++        if let Ok(s) = self.cast::<PyString>() {
+             // If input is not a valid complex string, instead of telling users to correct
+             // the string, it makes more sense to tell them to provide any acceptable value
+             // since they might have just given values of some incorrect types instead
+@@ -713,7 +713,7 @@ fn from_attributes_applicable(obj: &Bound<'_, PyAny>) -> bool {
+         .get_type()
+         .getattr(intern!(obj.py(), "__module__"))
+         .ok()
+-        .and_then(|module_name| module_name.downcast_into::<PyString>().ok())
++        .and_then(|module_name| module_name.cast_into::<PyString>().ok())
+     else {
+         return false;
+     };
+@@ -726,9 +726,9 @@ fn from_attributes_applicable(obj: &Bound<'_, PyAny>) -> bool {
+ 
+ /// Utility for extracting a string from a PyAny, if possible.
+ fn maybe_as_string<'a>(v: &'a Bound<'_, PyAny>, unicode_error: ErrorType) -> ValResult<Option<&'a str>> {
+-    if let Ok(py_string) = v.downcast::<PyString>() {
++    if let Ok(py_string) = v.cast::<PyString>() {
+         py_string_str(py_string).map(Some)
+-    } else if let Ok(bytes) = v.downcast::<PyBytes>() {
++    } else if let Ok(bytes) = v.cast::<PyBytes>() {
+         match from_utf8(bytes.as_bytes()) {
+             Ok(s) => Ok(Some(s)),
+             Err(_) => Err(ValError::new(unicode_error, v)),
+@@ -746,7 +746,7 @@ fn bytearray_to_str<'py>(bytearray: &Bound<'py, PyByteArray>) -> PyResult<Bound<
+     let py = bytearray.py();
+     let py_string = bytearray
+         .call_method1(intern!(py, "decode"), (intern!(py, "utf-8"),))?
+-        .downcast_into()?;
++        .cast_into()?;
+     Ok(py_string)
+ }
+ 
+@@ -916,13 +916,13 @@ pub enum PySequenceIterable<'a, 'py> {
+ /// or frozenset
+ fn extract_sequence_iterable<'a, 'py>(obj: &'a Bound<'py, PyAny>) -> ValResult<PySequenceIterable<'a, 'py>> {
+     // Handle concrete non-overlapping types first, then abstract types
+-    if let Ok(iterable) = obj.downcast::<PyList>() {
++    if let Ok(iterable) = obj.cast::<PyList>() {
+         Ok(PySequenceIterable::List(iterable))
+-    } else if let Ok(iterable) = obj.downcast::<PyTuple>() {
++    } else if let Ok(iterable) = obj.cast::<PyTuple>() {
+         Ok(PySequenceIterable::Tuple(iterable))
+-    } else if let Ok(iterable) = obj.downcast::<PySet>() {
++    } else if let Ok(iterable) = obj.cast::<PySet>() {
+         Ok(PySequenceIterable::Set(iterable))
+-    } else if let Ok(iterable) = obj.downcast::<PyFrozenSet>() {
++    } else if let Ok(iterable) = obj.cast::<PyFrozenSet>() {
+         Ok(PySequenceIterable::FrozenSet(iterable))
+     } else {
+         // Try to get this as a generable iterable thing, but exclude string and mapping types
+@@ -930,7 +930,7 @@ fn extract_sequence_iterable<'a, 'py>(obj: &'a Bound<'py, PyAny>) -> ValResult<P
+             || obj.is_instance_of::<PyBytes>()
+             || obj.is_instance_of::<PyByteArray>()
+             || obj.is_instance_of::<PyDict>()
+-            || obj.downcast::<PyMapping>().is_ok())
++            || obj.cast::<PyMapping>().is_ok())
+         {
+             if let Ok(iter) = obj.try_iter() {
+                 return Ok(PySequenceIterable::Iterator(iter));
+diff --git a/src/input/input_string.rs b/src/input/input_string.rs
+index a635188..38878a2 100644
+--- a/src/input/input_string.rs
++++ b/src/input/input_string.rs
+@@ -30,7 +30,7 @@ pub enum StringMapping<'py> {
+ 
+ impl<'py> StringMapping<'py> {
+     pub fn new_key(py_key: Bound<'py, PyAny>) -> ValResult<Self> {
+-        match py_key.downcast_into::<PyString>() {
++        match py_key.cast_into::<PyString>() {
+             Ok(value) => Ok(Self::String(value)),
+             Err(downcast_error) => Err(ValError::new(
+                 ErrorTypeDefaults::StringType,
+@@ -40,9 +40,9 @@ impl<'py> StringMapping<'py> {
+     }
+ 
+     pub fn new_value(py_value: Bound<'py, PyAny>) -> ValResult<Self> {
+-        match py_value.downcast_into::<PyString>() {
++        match py_value.cast_into::<PyString>() {
+             Ok(py_str) => Ok(Self::String(py_str)),
+-            Err(downcast_error) => match downcast_error.into_inner().downcast_into::<PyDict>() {
++            Err(downcast_error) => match downcast_error.into_inner().cast_into::<PyDict>() {
+                 Ok(value) => Ok(Self::Mapping(value)),
+                 Err(downcast_error) => Err(ValError::new(
+                     ErrorTypeDefaults::StringType,
+diff --git a/src/input/return_enums.rs b/src/input/return_enums.rs
+index 526d2c9..e84b955 100644
+--- a/src/input/return_enums.rs
++++ b/src/input/return_enums.rs
+@@ -21,7 +21,7 @@ use crate::errors::{
+     py_err_string, ErrorType, ErrorTypeDefaults, InputValue, ToErrorValue, ValError, ValLineError, ValResult,
+ };
+ use crate::py_gc::PyGcTraverse;
+-use crate::tools::{extract_i64, extract_int, new_py_string, py_err};
++use crate::tools::{extract_i64, new_py_string};
+ use crate::validators::{CombinedValidator, Exactness, ValidationState, Validator};
+ 
+ use super::{py_error_on_minusone, BorrowInput, Input};
+@@ -334,7 +334,7 @@ pub(crate) fn iterate_attributes<'a, 'py>(
+         // or we get to the end of the list of attributes
+         let name = attributes_iterator.next()?;
+         // from benchmarks this is 14x faster than using the python `startswith` method
+-        let name_cow = match name.downcast::<PyString>() {
++        let name_cow = match name.cast::<PyString>() {
+             Ok(name) => name.to_string_lossy(),
+             Err(e) => return Some(Err(e.into())),
+         };
+@@ -706,11 +706,15 @@ impl Rem for &Int {
+     }
+ }
+ 
+-impl FromPyObject<'_> for Int {
+-    fn extract_bound(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
+-        match extract_int(obj) {
+-            Some(i) => Ok(i),
+-            None => py_err!(PyTypeError; "Expected int, got {}", obj.get_type()),
++impl FromPyObject<'_, '_> for Int {
++    type Error = PyErr;
++    fn extract(obj: Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
++        if let Ok(i) = obj.extract() {
++            Ok(Int::I64(i))
++        } else if let Ok(b) = obj.extract() {
++            Ok(Int::Big(b))
++        } else {
++            Err(PyTypeError::new_err(format!("Expected int, got {}", obj.get_type())))
+         }
+     }
+ }
+diff --git a/src/lookup_key.rs b/src/lookup_key.rs
+index 525dd3b..469e536 100644
+--- a/src/lookup_key.rs
++++ b/src/lookup_key.rs
+@@ -47,7 +47,7 @@ impl fmt::Display for LookupKey {
+ 
+ impl LookupKey {
+     pub fn from_py(py: Python, value: &Bound<'_, PyAny>, alt_alias: Option<&str>) -> PyResult<Self> {
+-        if let Ok(alias_py) = value.downcast::<PyString>() {
++        if let Ok(alias_py) = value.cast::<PyString>() {
+             let alias: String = alias_py.extract()?;
+             let path1 = LookupPath::from_str(py, &alias, Some(alias_py.clone()));
+             match alt_alias {
+@@ -58,11 +58,11 @@ impl LookupKey {
+                 None => Ok(Self::Simple(path1)),
+             }
+         } else {
+-            let list = value.downcast::<PyList>()?;
++            let list = value.cast::<PyList>()?;
+             let Ok(first) = list.get_item(0) else {
+                 return py_schema_err!("Lookup paths should have at least one element");
+             };
+-            let mut locs: Vec<LookupPath> = if first.downcast::<PyString>().is_ok() {
++            let mut locs: Vec<LookupPath> = if first.cast::<PyString>().is_ok() {
+                 // list of strings rather than list of lists
+                 vec![LookupPath::from_list(list)?]
+             } else {
+@@ -333,13 +333,13 @@ impl LookupPath {
+     }
+ 
+     fn from_list(obj: &Bound<'_, PyAny>) -> PyResult<LookupPath> {
+-        let mut iter = obj.downcast::<PyList>()?.iter();
++        let mut iter = obj.cast::<PyList>()?.iter();
+ 
+         let Some(first_item) = iter.next() else {
+             return py_schema_err!("Each alias path should have at least one element");
+         };
+ 
+-        let Ok(first_item_py_str) = first_item.downcast_into::<PyString>() else {
++        let Ok(first_item_py_str) = first_item.cast_into::<PyString>() else {
+             return py_err!(PyTypeError; "The first item in an alias path should be a string");
+         };
+ 
+@@ -433,7 +433,7 @@ impl<'a, 'py> IntoPyObject<'py> for &'a PathItemString {
+ 
+ impl PathItem {
+     pub fn from_py(obj: Bound<'_, PyAny>) -> PyResult<Self> {
+-        let obj = match obj.downcast_into::<PyString>() {
++        let obj = match obj.cast_into::<PyString>() {
+             Ok(py_str_key) => {
+                 let str_key = py_str_key.to_str()?.to_string();
+                 return Ok(Self::S(PathItemString {
+@@ -455,7 +455,7 @@ impl PathItem {
+ 
+     pub fn py_get_item<'py>(&self, py_any: &Bound<'py, PyAny>) -> Option<Bound<'py, PyAny>> {
+         // we definitely don't want to index strings, so explicitly omit this case
+-        if py_any.downcast::<PyString>().is_ok() {
++        if py_any.cast::<PyString>().is_ok() {
+             None
+         } else {
+             // otherwise, blindly try getitem on v since no better logic is realistic
+@@ -508,7 +508,7 @@ impl PathItem {
+ impl PathItemString {
+     fn py_get_attrs<'py>(&self, obj: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+         // if obj is a dict, we want to use get_item, not getattr
+-        if obj.downcast::<PyDict>().is_ok() {
++        if obj.cast::<PyDict>().is_ok() {
+             Ok(py_get_item(obj, self))
+         } else {
+             py_get_attrs(obj, &self.py_key)
+diff --git a/src/serializers/computed_fields.rs b/src/serializers/computed_fields.rs
+index 890d4a8..17b8de1 100644
+--- a/src/serializers/computed_fields.rs
++++ b/src/serializers/computed_fields.rs
+@@ -169,7 +169,7 @@ impl ComputedField {
+         definitions: &mut DefinitionsBuilder<Arc<CombinedSerializer>>,
+     ) -> PyResult<Self> {
+         let py = schema.py();
+-        let schema: &Bound<'_, PyDict> = schema.downcast()?;
++        let schema: &Bound<'_, PyDict> = schema.cast()?;
+         let property_name: Bound<'_, PyString> = schema.get_as_req(intern!(py, "property_name"))?;
+         let return_schema = schema.get_as_req(intern!(py, "return_schema"))?;
+         let serializer = CombinedSerializer::build(&return_schema, config, definitions)
+diff --git a/src/serializers/config.rs b/src/serializers/config.rs
+index 69d03ea..a8cbe37 100644
+--- a/src/serializers/config.rs
++++ b/src/serializers/config.rs
+@@ -347,8 +347,9 @@ pub fn utf8_py_error(py: Python, err: Utf8Error, data: &[u8]) -> PyErr {
+     }
+ }
+ 
+-impl FromPyObject<'_> for InfNanMode {
+-    fn extract_bound(ob: &Bound<'_, PyAny>) -> PyResult<Self> {
+-        Self::from_str(ob.downcast::<PyString>()?.to_str()?)
++impl FromPyObject<'_, '_> for InfNanMode {
++    type Error = PyErr;
++    fn extract(ob: Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
++        Self::from_str(ob.cast::<PyString>()?.to_str()?)
+     }
+ }
+diff --git a/src/serializers/extra.rs b/src/serializers/extra.rs
+index 2e43954..1c7a810 100644
+--- a/src/serializers/extra.rs
++++ b/src/serializers/extra.rs
+@@ -403,9 +403,10 @@ pub enum WarningsMode {
+     Error,
+ }
+ 
+-impl<'py> FromPyObject<'py> for WarningsMode {
+-    fn extract_bound(ob: &Bound<'py, PyAny>) -> PyResult<WarningsMode> {
+-        if let Ok(bool_mode) = ob.downcast::<PyBool>() {
++impl FromPyObject<'_, '_> for WarningsMode {
++    type Error = PyErr;
++    fn extract(ob: Borrowed<'_, '_, PyAny>) -> PyResult<WarningsMode> {
++        if let Ok(bool_mode) = ob.cast::<PyBool>() {
+             Ok(bool_mode.is_true().into())
+         } else if let Ok(str_mode) = ob.extract::<&str>() {
+             match str_mode {
+diff --git a/src/serializers/fields.rs b/src/serializers/fields.rs
+index c79cfeb..5f3eaca 100644
+--- a/src/serializers/fields.rs
++++ b/src/serializers/fields.rs
+@@ -159,7 +159,7 @@ impl GeneralFieldsSerializer {
+         match self.mode {
+             FieldsMode::ModelExtra => value.extract().ok(),
+             _ => {
+-                if let Ok(main_dict) = value.downcast::<PyDict>() {
++                if let Ok(main_dict) = value.cast::<PyDict>() {
+                     Some((main_dict.clone(), None))
+                 } else {
+                     None
+@@ -479,7 +479,7 @@ impl TypeSerializer for GeneralFieldsSerializer {
+ }
+ 
+ fn key_str<'a>(key: &'a Bound<'_, PyAny>) -> PyResult<&'a str> {
+-    key.downcast::<PyString>()?.to_str()
++    key.cast::<PyString>()?.to_str()
+ }
+ 
+ fn dict_items<'py>(
+diff --git a/src/serializers/filter.rs b/src/serializers/filter.rs
+index 444033a..4208ad9 100644
+--- a/src/serializers/filter.rs
++++ b/src/serializers/filter.rs
+@@ -40,13 +40,13 @@ fn map_negative_indices<'py>(
+     len: Option<usize>,
+ ) -> PyResult<Bound<'py, PyAny>> {
+     let py = include_or_exclude.py();
+-    if let Ok(exclude_dict) = include_or_exclude.downcast::<PyDict>() {
++    if let Ok(exclude_dict) = include_or_exclude.cast::<PyDict>() {
+         let out = PyDict::new(py);
+         for (k, v) in exclude_dict.iter() {
+             out.set_item(map_negative_index(&k, len)?, v)?;
+         }
+         Ok(out.into_any())
+-    } else if let Ok(exclude_set) = include_or_exclude.downcast::<PySet>() {
++    } else if let Ok(exclude_set) = include_or_exclude.cast::<PySet>() {
+         let mut values = Vec::with_capacity(exclude_set.len());
+         for v in exclude_set.iter() {
+             values.push(map_negative_index(&v, len)?);
+@@ -79,7 +79,7 @@ impl SchemaFilter<usize> {
+                 if value.is_none() {
+                     Ok(None)
+                 } else {
+-                    let py_set = value.downcast::<PySet>()?;
++                    let py_set = value.cast::<PySet>()?;
+                     let mut set: AHashSet<usize> = AHashSet::with_capacity(py_set.len());
+ 
+                     for item in py_set {
+@@ -117,7 +117,7 @@ impl SchemaFilter<isize> {
+                 if value.is_none() {
+                     Ok(None)
+                 } else {
+-                    let py_set = value.downcast::<PySet>()?;
++                    let py_set = value.cast::<PySet>()?;
+                     let mut set: AHashSet<isize> = AHashSet::with_capacity(py_set.len());
+ 
+                     for item in py_set.iter() {
+@@ -160,7 +160,7 @@ trait FilterLogic<T: Eq + Copy> {
+         if let Some(exclude) = exclude {
+             if exclude.is_none() {
+                 // Do nothing; place this check at the top for performance in the common case
+-            } else if let Ok(exclude_dict) = exclude.downcast::<PyDict>() {
++            } else if let Ok(exclude_dict) = exclude.cast::<PyDict>() {
+                 let op_exc_value = merge_all_value(exclude_dict, py_key)?;
+                 if let Some(exc_value) = op_exc_value {
+                     if is_ellipsis_like(&exc_value) {
+@@ -171,7 +171,7 @@ trait FilterLogic<T: Eq + Copy> {
+                     // we want to return `Some((..., Some(next_exclude))`
+                     next_exclude = Some(exc_value);
+                 }
+-            } else if let Ok(exclude_set) = exclude.downcast::<PySet>() {
++            } else if let Ok(exclude_set) = exclude.cast::<PySet>() {
+                 if exclude_set.contains(py_key)? || exclude_set.contains(intern!(exclude_set.py(), "__all__"))? {
+                     // index is in the exclude set, we return Ok(None) to omit this index
+                     return Ok(None);
+@@ -188,7 +188,7 @@ trait FilterLogic<T: Eq + Copy> {
+         if let Some(include) = include {
+             if include.is_none() {
+                 // Do nothing; place this check at the top for performance in the common case
+-            } else if let Ok(include_dict) = include.downcast::<PyDict>() {
++            } else if let Ok(include_dict) = include.cast::<PyDict>() {
+                 let op_inc_value = merge_all_value(include_dict, py_key)?;
+ 
+                 if let Some(inc_value) = op_inc_value {
+@@ -203,7 +203,7 @@ trait FilterLogic<T: Eq + Copy> {
+                     // this index should be omitted
+                     return Ok(None);
+                 }
+-            } else if let Ok(include_set) = include.downcast::<PySet>() {
++            } else if let Ok(include_set) = include.cast::<PySet>() {
+                 if include_set.contains(py_key)? || include_set.contains(intern!(include_set.py(), "__all__"))? {
+                     return Ok(Some((None, next_exclude)));
+                 } else if !self.explicit_include(int_key) {
+@@ -318,7 +318,7 @@ where
+ /// detect both ellipsis and `True` to be compatible with pydantic V1
+ fn is_ellipsis_like(v: &Bound<'_, PyAny>) -> bool {
+     v.is(v.py().Ellipsis())
+-        || match v.downcast::<PyBool>() {
++        || match v.cast::<PyBool>() {
+             Ok(b) => b.is_true(),
+             Err(_) => false,
+         }
+@@ -349,9 +349,9 @@ fn merge_all_value<'py>(
+ }
+ 
+ fn as_dict<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
+-    if let Ok(dict) = value.downcast::<PyDict>() {
++    if let Ok(dict) = value.cast::<PyDict>() {
+         dict.copy()
+-    } else if let Ok(set) = value.downcast::<PySet>() {
++    } else if let Ok(set) = value.cast::<PySet>() {
+         let py = value.py();
+         let dict = PyDict::new(py);
+         for item in set.iter() {
+@@ -367,7 +367,7 @@ fn as_dict<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
+ 
+ fn merge_dicts<'py>(item_dict: &Bound<'py, PyDict>, all_value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
+     let item_dict = item_dict.copy()?;
+-    if let Ok(all_dict) = all_value.downcast::<PyDict>() {
++    if let Ok(all_dict) = all_value.cast::<PyDict>() {
+         for (all_key, all_value) in all_dict.iter() {
+             if let Some(item_value) = item_dict.get_item(&all_key)? {
+                 if is_ellipsis_like(&item_value) {
+@@ -382,7 +382,7 @@ fn merge_dicts<'py>(item_dict: &Bound<'py, PyDict>, all_value: &Bound<'py, PyAny
+                 item_dict.set_item(all_key, all_value)?;
+             }
+         }
+-    } else if let Ok(set) = all_value.downcast::<PySet>() {
++    } else if let Ok(set) = all_value.cast::<PySet>() {
+         for item in set.iter() {
+             if !item_dict.contains(&item)? {
+                 item_dict.set_item(item, set.py().Ellipsis())?;
+diff --git a/src/serializers/infer.rs b/src/serializers/infer.rs
+index 1f6f468..e29f7b5 100644
+--- a/src/serializers/infer.rs
++++ b/src/serializers/infer.rs
+@@ -18,7 +18,7 @@ use crate::serializers::shared::DoSerialize;
+ use crate::serializers::type_serializers;
+ use crate::serializers::type_serializers::format::serialize_via_str;
+ use crate::serializers::SerializationState;
+-use crate::tools::{extract_int, py_err, safe_repr};
++use crate::tools::{py_err, safe_repr};
+ 
+ use super::config::InfNanMode;
+ use super::errors::SERIALIZATION_ERR_MARKER;
+@@ -64,7 +64,7 @@ pub(crate) fn infer_to_python_known<'py>(
+         ($t:ty) => {{
+             let state = &mut state.scoped_include_exclude(None, None);
+             value
+-                .downcast::<$t>()?
++                .cast::<$t>()?
+                 .iter()
+                 .map(|v| infer_to_python(&v, state))
+                 .collect::<PyResult<Vec<Py<PyAny>>>>()?
+@@ -73,7 +73,7 @@ pub(crate) fn infer_to_python_known<'py>(
+ 
+     macro_rules! serialize_seq_filter {
+         ($t:ty) => {{
+-            let py_seq = value.downcast::<$t>()?;
++            let py_seq = value.cast::<$t>()?;
+             let mut items = Vec::with_capacity(py_seq.len());
+             let filter = AnyFilter::new();
+             let len = value.len().ok();
+@@ -95,7 +95,7 @@ pub(crate) fn infer_to_python_known<'py>(
+             ObType::None | ObType::Bool | ObType::Int | ObType::Str => value.clone().unbind(),
+             // have to do this to make sure subclasses of for example str are upcast to `str`
+             ObType::IntSubclass => {
+-                if let Some(i) = extract_int(value) {
++                if let Ok(i) = value.extract::<Int>() {
+                     i.into_py_any(py)?
+                 } else {
+                     return py_err!(PyTypeError; "Expected int, got {}", safe_repr(value));
+@@ -109,14 +109,14 @@ pub(crate) fn infer_to_python_known<'py>(
+                 v.into_py_any(py)?
+             }
+             ObType::Decimal => value.to_string().into_py_any(py)?,
+-            ObType::StrSubclass => PyString::new(py, value.downcast::<PyString>()?.to_str()?).into(),
++            ObType::StrSubclass => PyString::new(py, value.cast::<PyString>()?.to_str()?).into(),
+             ObType::Bytes => state
+                 .config
+                 .bytes_mode
+-                .bytes_to_string(py, value.downcast::<PyBytes>()?.as_bytes())?
++                .bytes_to_string(py, value.cast::<PyBytes>()?.as_bytes())?
+                 .into_py_any(py)?,
+             ObType::Bytearray => {
+-                let py_byte_array = value.downcast::<PyByteArray>()?;
++                let py_byte_array = value.cast::<PyByteArray>()?;
+                 pyo3::sync::with_critical_section(py_byte_array, || {
+                     // SAFETY: `py_byte_array` is protected by a critical section,
+                     // which guarantees no mutation, and `bytes_to_string` does not
+@@ -143,24 +143,21 @@ pub(crate) fn infer_to_python_known<'py>(
+                 PyList::new(py, elements)?.into()
+             }
+             ObType::Dict => {
+-                let dict = value.downcast::<PyDict>()?;
++                let dict = value.cast::<PyDict>()?;
+                 serialize_pairs_python(py, dict.iter().map(Ok), state, |k, state| {
+                     Ok(PyString::new(py, &infer_json_key(&k, state)?).into_any())
+                 })?
+             }
+             ObType::Datetime => {
+-                let datetime = state
+-                    .config
+-                    .temporal_mode
+-                    .datetime_to_json(value.py(), value.downcast()?)?;
++                let datetime = state.config.temporal_mode.datetime_to_json(value.py(), value.cast()?)?;
+                 datetime.into_py_any(py)?
+             }
+             ObType::Date => {
+-                let date = state.config.temporal_mode.date_to_json(value.py(), value.downcast()?)?;
++                let date = state.config.temporal_mode.date_to_json(value.py(), value.cast()?)?;
+                 date.into_py_any(py)?
+             }
+             ObType::Time => {
+-                let time = state.config.temporal_mode.time_to_json(value.py(), value.downcast()?)?;
++                let time = state.config.temporal_mode.time_to_json(value.py(), value.cast()?)?;
+                 time.into_py_any(py)?
+             }
+             ObType::Timedelta => {
+@@ -187,7 +184,7 @@ pub(crate) fn infer_to_python_known<'py>(
+                 infer_to_python(&v, state)?
+             }
+             ObType::Generator => {
+-                let py_seq = value.downcast::<PyIterator>()?;
++                let py_seq = value.cast::<PyIterator>()?;
+                 let mut items = Vec::new();
+                 let filter = AnyFilter::new();
+ 
+@@ -202,7 +199,7 @@ pub(crate) fn infer_to_python_known<'py>(
+                 PyList::new(py, items)?.into()
+             }
+             ObType::Complex => {
+-                let v = value.downcast::<PyComplex>()?;
++                let v = value.cast::<PyComplex>()?;
+                 let complex_str = type_serializers::complex::complex_to_str(v);
+                 complex_str.into_py_any(py)?
+             }
+@@ -237,14 +234,14 @@ pub(crate) fn infer_to_python_known<'py>(
+                 PyFrozenSet::new(py, &elements)?.into()
+             }
+             ObType::Dict => {
+-                let dict = value.downcast::<PyDict>()?;
++                let dict = value.cast::<PyDict>()?;
+                 serialize_pairs_python(py, dict.iter().map(Ok), state, |k, _| Ok(k))?
+             }
+             ObType::PydanticSerializable => call_pydantic_serializer(value, state, serialize_to_python())?,
+             ObType::Dataclass => serialize_pairs_python(py, any_dataclass_iter(value)?.0, state, |k, _| Ok(k))?,
+             ObType::Generator => {
+                 let iter = super::type_serializers::generator::SerializationIterator::new(
+-                    value.downcast()?,
++                    value.cast()?,
+                     super::type_serializers::any::AnySerializer::get(),
+                     SchemaFilter::default(),
+                     state,
+@@ -252,7 +249,7 @@ pub(crate) fn infer_to_python_known<'py>(
+                 iter.into_py_any(py)?
+             }
+             ObType::Complex => {
+-                let v = value.downcast::<PyComplex>()?;
++                let v = value.cast::<PyComplex>()?;
+                 v.into_py_any(py)?
+             }
+             ObType::Unknown => {
+@@ -330,7 +327,7 @@ pub(crate) fn infer_serialize_known<'py, S: Serializer>(
+     macro_rules! serialize_seq {
+         ($t:ty) => {{
+             let state = &mut state.scoped_include_exclude(None, None);
+-            let py_seq = value.downcast::<$t>().map_err(py_err_se_err)?;
++            let py_seq = value.cast::<$t>().map_err(py_err_se_err)?;
+             let mut seq = serializer.serialize_seq(Some(py_seq.len()))?;
+             for element in py_seq.iter() {
+                 let item_serializer = SerializeInfer::new(&element, state);
+@@ -342,7 +339,7 @@ pub(crate) fn infer_serialize_known<'py, S: Serializer>(
+ 
+     macro_rules! serialize_seq_filter {
+         ($t:ty) => {{
+-            let py_seq = value.downcast::<$t>().map_err(py_err_se_err)?;
++            let py_seq = value.cast::<$t>().map_err(py_err_se_err)?;
+             let mut seq = serializer.serialize_seq(Some(py_seq.len()))?;
+             let filter = AnyFilter::new();
+             let len = value.len().ok();
+@@ -364,7 +361,7 @@ pub(crate) fn infer_serialize_known<'py, S: Serializer>(
+         ObType::Int | ObType::IntSubclass => serialize!(Int),
+         ObType::Bool => serialize!(bool),
+         ObType::Complex => {
+-            let v = value.downcast::<PyComplex>().map_err(py_err_se_err)?;
++            let v = value.cast::<PyComplex>().map_err(py_err_se_err)?;
+             let complex_str = type_serializers::complex::complex_to_str(v);
+             Ok(serializer.collect_str::<String>(&complex_str)?)
+         }
+@@ -374,17 +371,17 @@ pub(crate) fn infer_serialize_known<'py, S: Serializer>(
+         }
+         ObType::Decimal => value.to_string().serialize(serializer),
+         ObType::Str | ObType::StrSubclass => {
+-            let py_str = value.downcast::<PyString>().map_err(py_err_se_err)?;
++            let py_str = value.cast::<PyString>().map_err(py_err_se_err)?;
+             serialize_to_json(serializer)
+                 .serialize_str(py_str)
+                 .map_err(unwrap_ser_error)
+         }
+         ObType::Bytes => {
+-            let py_bytes = value.downcast::<PyBytes>().map_err(py_err_se_err)?;
++            let py_bytes = value.cast::<PyBytes>().map_err(py_err_se_err)?;
+             state.config.bytes_mode.serialize_bytes(py_bytes.as_bytes(), serializer)
+         }
+         ObType::Bytearray => {
+-            let py_byte_array = value.downcast::<PyByteArray>().map_err(py_err_se_err)?;
++            let py_byte_array = value.cast::<PyByteArray>().map_err(py_err_se_err)?;
+             pyo3::sync::with_critical_section(py_byte_array, || {
+                 // SAFETY: `py_byte_array` is protected by a critical section,
+                 // which guarantees no mutation, and `serialize_bytes` does not
+@@ -395,7 +392,7 @@ pub(crate) fn infer_serialize_known<'py, S: Serializer>(
+             })
+         }
+         ObType::Dict => {
+-            let dict = value.downcast::<PyDict>().map_err(py_err_se_err)?;
++            let dict = value.cast::<PyDict>().map_err(py_err_se_err)?;
+             serialize_pairs_json(dict.iter().map(Ok), dict.len(), serializer, state)
+         }
+         ObType::List => serialize_seq_filter!(PyList),
+@@ -403,15 +400,15 @@ pub(crate) fn infer_serialize_known<'py, S: Serializer>(
+         ObType::Set => serialize_seq!(PySet),
+         ObType::Frozenset => serialize_seq!(PyFrozenSet),
+         ObType::Datetime => {
+-            let py_datetime = value.downcast().map_err(py_err_se_err)?;
++            let py_datetime = value.cast().map_err(py_err_se_err)?;
+             state.config.temporal_mode.datetime_serialize(py_datetime, serializer)
+         }
+         ObType::Date => {
+-            let py_date = value.downcast().map_err(py_err_se_err)?;
++            let py_date = value.cast().map_err(py_err_se_err)?;
+             state.config.temporal_mode.date_serialize(py_date, serializer)
+         }
+         ObType::Time => {
+-            let py_time = value.downcast().map_err(py_err_se_err)?;
++            let py_time = value.cast().map_err(py_err_se_err)?;
+             state.config.temporal_mode.time_serialize(py_time, serializer)
+         }
+         ObType::Timedelta => {
+@@ -441,7 +438,7 @@ pub(crate) fn infer_serialize_known<'py, S: Serializer>(
+             infer_serialize(&v, serializer, state)
+         }
+         ObType::Generator => {
+-            let py_seq = value.downcast::<PyIterator>().map_err(py_err_se_err)?;
++            let py_seq = value.cast::<PyIterator>().map_err(py_err_se_err)?;
+             let mut seq = serializer.serialize_seq(None)?;
+             let filter = AnyFilter::new();
+             for (index, r) in py_seq.try_iter().map_err(py_err_se_err)?.enumerate() {
+@@ -527,13 +524,13 @@ pub(crate) fn infer_json_key_known<'a, 'py>(
+         }
+         ObType::Decimal => Ok(Cow::Owned(key.to_string())),
+         ObType::Bool => super::type_serializers::simple::bool_json_key(key),
+-        ObType::Str | ObType::StrSubclass => key.downcast::<PyString>()?.to_cow(),
++        ObType::Str | ObType::StrSubclass => key.cast::<PyString>()?.to_cow(),
+         ObType::Bytes => state
+             .config
+             .bytes_mode
+-            .bytes_to_string(key.py(), key.downcast::<PyBytes>()?.as_bytes()),
++            .bytes_to_string(key.py(), key.cast::<PyBytes>()?.as_bytes()),
+         ObType::Bytearray => {
+-            let py_byte_array = key.downcast::<PyByteArray>()?;
++            let py_byte_array = key.cast::<PyByteArray>()?;
+             pyo3::sync::with_critical_section(py_byte_array, || {
+                 // SAFETY: `py_byte_array` is protected by a critical section,
+                 // which guarantees no mutation, and `bytes_to_string` does not
+@@ -544,9 +541,9 @@ pub(crate) fn infer_json_key_known<'a, 'py>(
+             })
+             .map(|cow| Cow::Owned(cow.into_owned()))
+         }
+-        ObType::Datetime => state.config.temporal_mode.datetime_json_key(key.downcast()?),
+-        ObType::Date => state.config.temporal_mode.date_json_key(key.downcast()?),
+-        ObType::Time => state.config.temporal_mode.time_json_key(key.downcast()?),
++        ObType::Datetime => state.config.temporal_mode.datetime_json_key(key.cast()?),
++        ObType::Date => state.config.temporal_mode.date_json_key(key.cast()?),
++        ObType::Time => state.config.temporal_mode.time_json_key(key.cast()?),
+         ObType::Uuid => {
+             let uuid = super::type_serializers::uuid::uuid_to_string(key)?;
+             Ok(Cow::Owned(uuid))
+@@ -567,7 +564,7 @@ pub(crate) fn infer_json_key_known<'a, 'py>(
+         }
+         ObType::Tuple => {
+             let mut key_build = super::type_serializers::tuple::KeyBuilder::new();
+-            for element in key.downcast::<PyTuple>()?.iter_borrowed() {
++            for element in key.cast::<PyTuple>()?.iter_borrowed() {
+                 key_build.push(&infer_json_key(&element, state)?);
+             }
+             Ok(Cow::Owned(key_build.finish()))
+@@ -586,7 +583,7 @@ pub(crate) fn infer_json_key_known<'a, 'py>(
+             infer_json_key(&k, state).map(|cow| Cow::Owned(cow.into_owned()))
+         }
+         ObType::Complex => {
+-            let v = key.downcast::<PyComplex>()?;
++            let v = key.cast::<PyComplex>()?;
+             Ok(type_serializers::complex::complex_to_str(v).into())
+         }
+         ObType::Pattern => Ok(Cow::Owned(
+@@ -618,7 +615,7 @@ pub(crate) fn call_pydantic_serializer<'py, T, E: From<PyErr>>(
+ ) -> Result<T, E> {
+     let py = value.py();
+     let py_serializer = value.getattr(intern!(py, "__pydantic_serializer__"))?;
+-    let extracted_serializer: PyRef<SchemaSerializer> = py_serializer.extract()?;
++    let extracted_serializer: PyRef<SchemaSerializer> = py_serializer.extract().map_err(Into::into)?;
+     let mut state = SerializationState {
+         warnings: state.warnings.clone(),
+         rec_guard: state.rec_guard.clone(),
+diff --git a/src/serializers/mod.rs b/src/serializers/mod.rs
+index 63d288e..5fc924d 100644
+--- a/src/serializers/mod.rs
++++ b/src/serializers/mod.rs
+@@ -61,7 +61,7 @@ impl SchemaSerializer {
+     #[pyo3(signature = (schema, config=None))]
+     pub fn py_new(schema: Bound<'_, PyDict>, config: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+         let mut definitions_builder = DefinitionsBuilder::new();
+-        let serializer = CombinedSerializer::build_base(schema.downcast()?, config, &mut definitions_builder)?;
++        let serializer = CombinedSerializer::build_base(schema.cast()?, config, &mut definitions_builder)?;
+         Ok(Self {
+             serializer,
+             definitions: definitions_builder.finish()?,
+diff --git a/src/serializers/ob_type.rs b/src/serializers/ob_type.rs
+index 97d683e..b21f3d8 100644
+--- a/src/serializers/ob_type.rs
++++ b/src/serializers/ob_type.rs
+@@ -391,7 +391,7 @@ fn is_pydantic_serializable(op_value: Option<&Bound<'_, PyAny>>) -> bool {
+ 
+ fn is_generator(op_value: Option<&Bound<'_, PyAny>>) -> bool {
+     if let Some(value) = op_value {
+-        value.downcast::<PyIterator>().is_ok()
++        value.cast::<PyIterator>().is_ok()
+     } else {
+         false
+     }
+diff --git a/src/serializers/shared.rs b/src/serializers/shared.rs
+index f8a0201..1706012 100644
+--- a/src/serializers/shared.rs
++++ b/src/serializers/shared.rs
+@@ -590,13 +590,13 @@ where
+     let py = dataclass.py();
+     let fields = dataclass
+         .getattr(intern!(py, "__dataclass_fields__"))?
+-        .downcast_into::<PyDict>()?;
++        .cast_into::<PyDict>()?;
+     let field_type_marker = get_field_marker(py)?;
+ 
+     let next = move |(field_name, field): (Bound<'py, PyAny>, Bound<'py, PyAny>)| -> PyResult<Option<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
+         let field_type = field.getattr(intern!(py, "_field_type"))?;
+         if field_type.is(field_type_marker) {
+-            let value = dataclass.getattr(field_name.downcast::<PyString>()?)?;
++            let value = dataclass.getattr(field_name.cast::<PyString>()?)?;
+             Ok(Some((field_name, value)))
+         } else {
+             Ok(None)
+diff --git a/src/serializers/type_serializers/bytes.rs b/src/serializers/type_serializers/bytes.rs
+index 0c9b5ec..cf698d2 100644
+--- a/src/serializers/type_serializers/bytes.rs
++++ b/src/serializers/type_serializers/bytes.rs
+@@ -71,7 +71,7 @@ impl TypeSerializer for BytesSerializer {
+         state: &mut SerializationState<'_, 'py>,
+     ) -> PyResult<Py<PyAny>> {
+         let py = value.py();
+-        match value.downcast::<PyBytes>() {
++        match value.cast::<PyBytes>() {
+             Ok(py_bytes) => match state.extra.mode {
+                 SerMode::Json => self
+                     .bytes_mode
+@@ -91,7 +91,7 @@ impl TypeSerializer for BytesSerializer {
+         key: &'a Bound<'py, PyAny>,
+         state: &mut SerializationState<'_, 'py>,
+     ) -> PyResult<Cow<'a, str>> {
+-        match key.downcast::<PyBytes>() {
++        match key.cast::<PyBytes>() {
+             Ok(py_bytes) => self.bytes_mode.bytes_to_string(key.py(), py_bytes.as_bytes()),
+             Err(_) => {
+                 state.warn_fallback_py(self.get_name(), key)?;
+@@ -106,7 +106,7 @@ impl TypeSerializer for BytesSerializer {
+         serializer: S,
+         state: &mut SerializationState<'_, 'py>,
+     ) -> Result<S::Ok, S::Error> {
+-        match value.downcast::<PyBytes>() {
++        match value.cast::<PyBytes>() {
+             Ok(py_bytes) => self.bytes_mode.serialize_bytes(py_bytes.as_bytes(), serializer),
+             Err(_) => {
+                 state.warn_fallback_ser::<S>(self.get_name(), value)?;
+diff --git a/src/serializers/type_serializers/complex.rs b/src/serializers/type_serializers/complex.rs
+index d4f2bdb..ddde64e 100644
+--- a/src/serializers/type_serializers/complex.rs
++++ b/src/serializers/type_serializers/complex.rs
+@@ -35,7 +35,7 @@ impl TypeSerializer for ComplexSerializer {
+         state: &mut SerializationState<'_, 'py>,
+     ) -> PyResult<Py<PyAny>> {
+         let py = value.py();
+-        match value.downcast::<PyComplex>() {
++        match value.cast::<PyComplex>() {
+             Ok(py_complex) => match state.extra.mode {
+                 SerMode::Json => complex_to_str(py_complex).into_py_any(py),
+                 _ => Ok(value.clone().unbind()),
+@@ -61,7 +61,7 @@ impl TypeSerializer for ComplexSerializer {
+         serializer: S,
+         state: &mut SerializationState<'_, 'py>,
+     ) -> Result<S::Ok, S::Error> {
+-        match value.downcast::<PyComplex>() {
++        match value.cast::<PyComplex>() {
+             Ok(py_complex) => {
+                 let s = complex_to_str(py_complex);
+                 Ok(serializer.collect_str::<String>(&s)?)
+diff --git a/src/serializers/type_serializers/dataclass.rs b/src/serializers/type_serializers/dataclass.rs
+index f9ccd2b..ea79d68 100644
+--- a/src/serializers/type_serializers/dataclass.rs
++++ b/src/serializers/type_serializers/dataclass.rs
+@@ -41,7 +41,7 @@ impl BuildSerializer for DataclassArgsBuilder {
+         let serialize_by_alias = config.get_as(intern!(py, "serialize_by_alias"))?;
+ 
+         for (index, item) in fields_list.iter().enumerate() {
+-            let field_info = item.downcast::<PyDict>()?;
++            let field_info = item.cast::<PyDict>()?;
+             let name: String = field_info.get_as_req(intern!(py, "name"))?;
+ 
+             let key_py: Py<PyString> = PyString::new(py, &name).into();
+@@ -108,7 +108,7 @@ impl BuildSerializer for DataclassSerializer {
+         let fields = schema
+             .get_as_req::<Bound<'_, PyList>>(intern!(py, "fields"))?
+             .iter()
+-            .map(|s| Ok(s.downcast_into::<PyString>()?.unbind()))
++            .map(|s| Ok(s.cast_into::<PyString>()?.unbind()))
+             .collect::<PyResult<Vec<_>>>()?;
+ 
+         Ok(CombinedSerializer::Dataclass(Self {
+diff --git a/src/serializers/type_serializers/datetime_etc.rs b/src/serializers/type_serializers/datetime_etc.rs
+index 07c1db1..367fecd 100644
+--- a/src/serializers/type_serializers/datetime_etc.rs
++++ b/src/serializers/type_serializers/datetime_etc.rs
+@@ -71,7 +71,7 @@ pub(crate) fn time_to_milliseconds(py_time: &Bound<'_, PyTime>) -> PyResult<f64>
+ }
+ 
+ fn downcast_date_reject_datetime<'a, 'py>(py_date: &'a Bound<'py, PyAny>) -> PyResult<&'a Bound<'py, PyDate>> {
+-    if let Ok(py_date) = py_date.downcast::<PyDate>() {
++    if let Ok(py_date) = py_date.cast::<PyDate>() {
+         // because `datetime` is a subclass of `date` we have to check that the value is not a
+         // `datetime` to avoid lossy serialization
+         if !py_date.is_instance_of::<PyDateTime>() {
+@@ -168,7 +168,7 @@ macro_rules! build_temporal_serializer {
+ build_temporal_serializer!(
+     DatetimeSerializer,
+     "datetime",
+-    PyAnyMethods::downcast::<PyDateTime>,
++    Bound::cast::<PyDateTime>,
+     datetime_to_json,
+     datetime_json_key,
+     datetime_serialize
+@@ -186,7 +186,7 @@ build_temporal_serializer!(
+ build_temporal_serializer!(
+     TimeSerializer,
+     "time",
+-    PyAnyMethods::downcast::<PyTime>,
++    Bound::cast::<PyTime>,
+     time_to_json,
+     time_json_key,
+     time_serialize
+diff --git a/src/serializers/type_serializers/definitions.rs b/src/serializers/type_serializers/definitions.rs
+index 64c115f..6f408db 100644
+--- a/src/serializers/type_serializers/definitions.rs
++++ b/src/serializers/type_serializers/definitions.rs
+@@ -30,7 +30,7 @@ impl BuildSerializer for DefinitionsSerializerBuilder {
+         let schema_definitions: Bound<'_, PyList> = schema.get_as_req(intern!(py, "definitions"))?;
+ 
+         for schema_definition in schema_definitions {
+-            let schema = schema_definition.downcast()?;
++            let schema = schema_definition.cast()?;
+             let reference = schema.get_as_req::<String>(intern!(py, "ref"))?;
+             let serializer = CombinedSerializer::build(schema, config, definitions)?;
+             definitions.add_definition(reference, serializer)?;
+diff --git a/src/serializers/type_serializers/dict.rs b/src/serializers/type_serializers/dict.rs
+index 58b11e5..c619de3 100644
+--- a/src/serializers/type_serializers/dict.rs
++++ b/src/serializers/type_serializers/dict.rs
+@@ -80,7 +80,7 @@ impl TypeSerializer for DictSerializer {
+         state: &mut SerializationState<'_, 'py>,
+     ) -> PyResult<Py<PyAny>> {
+         let py = value.py();
+-        match value.downcast::<PyDict>() {
++        match value.cast::<PyDict>() {
+             Ok(py_dict) => {
+                 let value_serializer = self.value_serializer.as_ref();
+ 
+@@ -124,7 +124,7 @@ impl TypeSerializer for DictSerializer {
+         serializer: S,
+         state: &mut SerializationState<'_, 'py>,
+     ) -> Result<S::Ok, S::Error> {
+-        match value.downcast::<PyDict>() {
++        match value.cast::<PyDict>() {
+             Ok(py_dict) => {
+                 let mut map = serializer.serialize_map(Some(py_dict.len()))?;
+                 let key_serializer = self.key_serializer.as_ref();
+diff --git a/src/serializers/type_serializers/format.rs b/src/serializers/type_serializers/format.rs
+index ed7940b..451ba17 100644
+--- a/src/serializers/type_serializers/format.rs
++++ b/src/serializers/type_serializers/format.rs
+@@ -130,7 +130,7 @@ impl TypeSerializer for FormatSerializer {
+                 .call(key)
+                 .map_err(PydanticSerializationError::new_err)?
+                 .into_bound(key.py())
+-                .downcast_into::<PyString>()?;
++                .cast_into::<PyString>()?;
+             Ok(Cow::Owned(py_str.to_str()?.to_owned()))
+         } else {
+             none_json_key()
+@@ -146,7 +146,7 @@ impl TypeSerializer for FormatSerializer {
+         if self.when_used.should_use_json(value) {
+             match self.call(value) {
+                 Ok(v) => {
+-                    let py_str = v.bind(value.py()).downcast().map_err(py_err_se_err)?;
++                    let py_str = v.bind(value.py()).cast().map_err(py_err_se_err)?;
+                     serialize_to_json(serializer)
+                         .serialize_str(py_str)
+                         .map_err(unwrap_ser_error)
+diff --git a/src/serializers/type_serializers/generator.rs b/src/serializers/type_serializers/generator.rs
+index 56e41f9..6fbaaee 100644
+--- a/src/serializers/type_serializers/generator.rs
++++ b/src/serializers/type_serializers/generator.rs
+@@ -56,7 +56,7 @@ impl TypeSerializer for GeneratorSerializer {
+         value: &Bound<'py, PyAny>,
+         state: &mut SerializationState<'_, 'py>,
+     ) -> PyResult<Py<PyAny>> {
+-        match value.downcast::<PyIterator>() {
++        match value.cast::<PyIterator>() {
+             Ok(py_iter) => {
+                 let py = value.py();
+                 match state.extra.mode {
+@@ -105,7 +105,7 @@ impl TypeSerializer for GeneratorSerializer {
+         serializer: S,
+         state: &mut SerializationState<'_, 'py>,
+     ) -> Result<S::Ok, S::Error> {
+-        match value.downcast::<PyIterator>() {
++        match value.cast::<PyIterator>() {
+             Ok(py_iter) => {
+                 let len = value.len().ok();
+                 let mut seq = serializer.serialize_seq(len)?;
+diff --git a/src/serializers/type_serializers/list.rs b/src/serializers/type_serializers/list.rs
+index e34e58d..3eec05d 100644
+--- a/src/serializers/type_serializers/list.rs
++++ b/src/serializers/type_serializers/list.rs
+@@ -58,7 +58,7 @@ impl TypeSerializer for ListSerializer {
+         value: &Bound<'py, PyAny>,
+         state: &mut SerializationState<'_, 'py>,
+     ) -> PyResult<Py<PyAny>> {
+-        match value.downcast::<PyList>() {
++        match value.cast::<PyList>() {
+             Ok(py_list) => {
+                 let py = value.py();
+                 let item_serializer = self.item_serializer.as_ref();
+@@ -94,7 +94,7 @@ impl TypeSerializer for ListSerializer {
+         serializer: S,
+         state: &mut SerializationState<'_, 'py>,
+     ) -> Result<S::Ok, S::Error> {
+-        match value.downcast::<PyList>() {
++        match value.cast::<PyList>() {
+             Ok(py_list) => {
+                 let mut seq = serializer.serialize_seq(Some(py_list.len()))?;
+                 let item_serializer = self.item_serializer.as_ref();
+diff --git a/src/serializers/type_serializers/literal.rs b/src/serializers/type_serializers/literal.rs
+index d39f019..8f8a93d 100644
+--- a/src/serializers/type_serializers/literal.rs
++++ b/src/serializers/type_serializers/literal.rs
+@@ -47,11 +47,11 @@ impl BuildSerializer for LiteralSerializer {
+         let mut repr_args: Vec<String> = Vec::new();
+         for item in expected {
+             repr_args.push(item.repr()?.extract()?);
+-            if let Ok(bool) = item.downcast::<PyBool>() {
++            if let Ok(bool) = item.cast::<PyBool>() {
+                 expected_py.append(bool)?;
+             } else if let Some(int) = extract_i64(&item) {
+                 expected_int.insert(int);
+-            } else if let Ok(py_str) = item.downcast::<PyString>() {
++            } else if let Ok(py_str) = item.cast::<PyString>() {
+                 expected_str.insert(py_str.to_str()?.to_string());
+             } else {
+                 expected_py.append(item)?;
+@@ -91,7 +91,7 @@ impl LiteralSerializer {
+                 }
+             }
+             if !self.expected_str.is_empty() {
+-                if let Ok(py_str) = value.downcast::<PyString>() {
++                if let Ok(py_str) = value.cast::<PyString>() {
+                     let s = py_str.to_str()?;
+                     if self.expected_str.contains(s) {
+                         return Ok(OutputValue::OkStr(PyString::new(value.py(), s)));
+diff --git a/src/serializers/type_serializers/model.rs b/src/serializers/type_serializers/model.rs
+index 63b91d9..52d53f7 100644
+--- a/src/serializers/type_serializers/model.rs
++++ b/src/serializers/type_serializers/model.rs
+@@ -56,9 +56,9 @@ impl BuildSerializer for ModelFieldsBuilder {
+         let serialize_by_alias = config.get_as(intern!(py, "serialize_by_alias"))?;
+ 
+         for (key, value) in fields_dict {
+-            let key_py = key.downcast_into::<PyString>()?;
++            let key_py = key.cast_into::<PyString>()?;
+             let key: String = key_py.extract()?;
+-            let field_info = value.downcast()?;
++            let field_info = value.cast()?;
+ 
+             let key_py: Py<PyString> = key_py.into();
+ 
+@@ -222,12 +222,12 @@ impl ModelSerializer {
+ 
+     fn get_inner_value<'py>(&self, model: &Bound<'py, PyAny>, extra: &Extra) -> PyResult<Bound<'py, PyAny>> {
+         let py: Python<'_> = model.py();
+-        let mut attrs = model.getattr(intern!(py, "__dict__"))?.downcast_into::<PyDict>()?;
++        let mut attrs = model.getattr(intern!(py, "__dict__"))?.cast_into::<PyDict>()?;
+ 
+         if extra.exclude_unset {
+             let fields_set = model
+                 .getattr(intern!(py, "__pydantic_fields_set__"))?
+-                .downcast_into::<PySet>()?;
++                .cast_into::<PySet>()?;
+ 
+             let new_attrs = attrs.copy()?;
+             for key in new_attrs.keys() {
+diff --git a/src/serializers/type_serializers/other.rs b/src/serializers/type_serializers/other.rs
+index 56dae66..6bdff02 100644
+--- a/src/serializers/type_serializers/other.rs
++++ b/src/serializers/type_serializers/other.rs
+@@ -26,7 +26,7 @@ impl BuildSerializer for ChainBuilder {
+             .iter()
+             .last()
+             .unwrap()
+-            .downcast_into()?;
++            .cast_into()?;
+         CombinedSerializer::build(&last_schema, config, definitions)
+     }
+ }
+diff --git a/src/serializers/type_serializers/set_frozenset.rs b/src/serializers/type_serializers/set_frozenset.rs
+index 4ed0dd2..9bde4e7 100644
+--- a/src/serializers/type_serializers/set_frozenset.rs
++++ b/src/serializers/type_serializers/set_frozenset.rs
+@@ -57,7 +57,7 @@ macro_rules! build_serializer {
+                 state: &mut SerializationState<'_, 'py>,
+             ) -> PyResult<Py<PyAny>> {
+                 let py = value.py();
+-                match value.downcast::<$py_type>() {
++                match value.cast::<$py_type>() {
+                     Ok(py_set) => {
+                         let item_serializer = self.item_serializer.as_ref();
+ 
+@@ -91,7 +91,7 @@ macro_rules! build_serializer {
+                 serializer: S,
+                 state: &mut SerializationState<'_, 'py>,
+             ) -> Result<S::Ok, S::Error> {
+-                match value.downcast::<$py_type>() {
++                match value.cast::<$py_type>() {
+                     Ok(py_set) => {
+                         let mut seq = serializer.serialize_seq(Some(py_set.len()))?;
+                         let item_serializer = self.item_serializer.as_ref();
+diff --git a/src/serializers/type_serializers/string.rs b/src/serializers/type_serializers/string.rs
+index 8cdafd0..e650faf 100644
+--- a/src/serializers/type_serializers/string.rs
++++ b/src/serializers/type_serializers/string.rs
+@@ -50,7 +50,7 @@ impl TypeSerializer for StrSerializer {
+         match state.extra.ob_type_lookup.is_type(value, ObType::Str) {
+             IsType::Exact => Ok(value.clone().unbind()),
+             IsType::Subclass => match state.extra.mode {
+-                SerMode::Json => value.downcast::<PyString>()?.to_str()?.into_py_any(py),
++                SerMode::Json => value.cast::<PyString>()?.to_str()?.into_py_any(py),
+                 _ => Ok(value.clone().unbind()),
+             },
+             IsType::False => {
+@@ -65,7 +65,7 @@ impl TypeSerializer for StrSerializer {
+         key: &'a Bound<'py, PyAny>,
+         state: &mut SerializationState<'_, 'py>,
+     ) -> PyResult<Cow<'a, str>> {
+-        if let Ok(py_str) = key.downcast::<PyString>() {
++        if let Ok(py_str) = key.cast::<PyString>() {
+             // FIXME py cow to avoid the copy
+             Ok(Cow::Owned(py_str.to_string_lossy().into_owned()))
+         } else {
+@@ -80,7 +80,7 @@ impl TypeSerializer for StrSerializer {
+         serializer: S,
+         state: &mut SerializationState<'_, 'py>,
+     ) -> Result<S::Ok, S::Error> {
+-        match value.downcast::<PyString>() {
++        match value.cast::<PyString>() {
+             Ok(py_str) => serialize_to_json(serializer)
+                 .serialize_str(py_str)
+                 .map_err(unwrap_ser_error),
+diff --git a/src/serializers/type_serializers/tuple.rs b/src/serializers/type_serializers/tuple.rs
+index f53ab3e..b0d3b4e 100644
+--- a/src/serializers/type_serializers/tuple.rs
++++ b/src/serializers/type_serializers/tuple.rs
+@@ -39,7 +39,7 @@ impl BuildSerializer for TupleSerializer {
+         let items: Bound<'_, PyList> = schema.get_as_req(intern!(py, "items_schema"))?;
+         let serializers: Vec<Arc<CombinedSerializer>> = items
+             .iter()
+-            .map(|item| CombinedSerializer::build(item.downcast()?, config, definitions))
++            .map(|item| CombinedSerializer::build(item.cast()?, config, definitions))
+             .collect::<PyResult<_>>()?;
+ 
+         let mut serializer_names = serializers.iter().map(|v| v.get_name()).collect::<Vec<_>>();
+@@ -67,7 +67,7 @@ impl TypeSerializer for TupleSerializer {
+         value: &Bound<'py, PyAny>,
+         state: &mut SerializationState<'_, 'py>,
+     ) -> PyResult<Py<PyAny>> {
+-        match value.downcast::<PyTuple>() {
++        match value.cast::<PyTuple>() {
+             Ok(py_tuple) => {
+                 let py = value.py();
+ 
+@@ -98,7 +98,7 @@ impl TypeSerializer for TupleSerializer {
+         key: &'a Bound<'py, PyAny>,
+         state: &mut SerializationState<'_, 'py>,
+     ) -> PyResult<Cow<'a, str>> {
+-        match key.downcast::<PyTuple>() {
++        match key.cast::<PyTuple>() {
+             Ok(py_tuple) => {
+                 let mut key_builder = KeyBuilder::new();
+ 
+@@ -125,9 +125,9 @@ impl TypeSerializer for TupleSerializer {
+         serializer: S,
+         state: &mut SerializationState<'_, 'py>,
+     ) -> Result<S::Ok, S::Error> {
+-        match value.downcast::<PyTuple>() {
++        match value.cast::<PyTuple>() {
+             Ok(py_tuple) => {
+-                let py_tuple = py_tuple.downcast::<PyTuple>().map_err(py_err_se_err)?;
++                let py_tuple = py_tuple.cast::<PyTuple>().map_err(py_err_se_err)?;
+ 
+                 let n_items = py_tuple.len();
+                 let mut seq = serializer.serialize_seq(Some(n_items))?;
+diff --git a/src/serializers/type_serializers/typed_dict.rs b/src/serializers/type_serializers/typed_dict.rs
+index 4225258..7fdb859 100644
+--- a/src/serializers/type_serializers/typed_dict.rs
++++ b/src/serializers/type_serializers/typed_dict.rs
+@@ -55,9 +55,9 @@ impl BuildSerializer for TypedDictSerializer {
+         };
+ 
+         for (key, value) in fields_dict {
+-            let key_py = key.downcast_into::<PyString>()?;
++            let key_py = key.cast_into::<PyString>()?;
+             let key: String = key_py.extract()?;
+-            let field_info = value.downcast()?;
++            let field_info = value.cast()?;
+ 
+             let key_py: Py<PyString> = key_py.into();
+             let required = field_info.get_as(intern!(py, "required"))?.unwrap_or(total);
+diff --git a/src/serializers/type_serializers/union.rs b/src/serializers/type_serializers/union.rs
+index 9416208..840c145 100644
+--- a/src/serializers/type_serializers/union.rs
++++ b/src/serializers/type_serializers/union.rs
+@@ -36,11 +36,11 @@ impl BuildSerializer for UnionSerializer {
+             .get_as_req::<Bound<'_, PyList>>(intern!(py, "choices"))?
+             .iter()
+             .map(|choice| {
+-                let choice = match choice.downcast::<PyTuple>() {
++                let choice = match choice.cast::<PyTuple>() {
+                     Ok(py_tuple) => py_tuple.get_item(0)?,
+                     Err(_) => choice,
+                 };
+-                CombinedSerializer::build(choice.downcast()?, config, definitions)
++                CombinedSerializer::build(choice.cast()?, config, definitions)
+             })
+             .collect::<PyResult<_>>()?;
+ 
+@@ -212,7 +212,7 @@ impl BuildSerializer for TaggedUnionSerializer {
+         let mut choices = Vec::with_capacity(choices_map.len());
+ 
+         for (idx, (choice_key, choice_schema)) in choices_map.into_iter().enumerate() {
+-            let serializer = CombinedSerializer::build(choice_schema.downcast()?, config, definitions)?;
++            let serializer = CombinedSerializer::build(choice_schema.cast()?, config, definitions)?;
+             choices.push(serializer);
+             lookup.insert(choice_key.to_string(), idx);
+         }
+@@ -295,7 +295,7 @@ impl TaggedUnionSerializer {
+                 // we're pretty lax here, we allow either dict[key] or object.key, as we very well could
+                 // be doing a discriminator lookup on a typed dict, and there's no good way to check that
+                 // at this point. we could be more strict and only do this in lax mode...
+-                if let Ok(value_dict) = value.downcast::<PyDict>() {
++                if let Ok(value_dict) = value.cast::<PyDict>() {
+                     lookup_key.py_get_dict_item(value_dict).ok().flatten()
+                 } else {
+                     lookup_key.simple_py_get_attr(value).ok().flatten()
+diff --git a/src/tools.rs b/src/tools.rs
+index 8ce929c..059b3d2 100644
+--- a/src/tools.rs
++++ b/src/tools.rs
+@@ -1,43 +1,40 @@
+ use core::fmt;
+ 
+-use num_bigint::BigInt;
+-
+ use pyo3::exceptions::PyKeyError;
++use pyo3::intern;
+ use pyo3::prelude::*;
+ use pyo3::types::{PyDict, PyMapping, PyString};
+-use pyo3::{intern, FromPyObject};
+ 
+-use crate::input::Int;
+ use crate::PydanticUndefinedType;
+ use jiter::{cached_py_string, StringCacheMode};
+ 
+ pub trait SchemaDict<'py> {
+     fn get_as<T>(&self, key: &Bound<'py, PyString>) -> PyResult<Option<T>>
+     where
+-        T: FromPyObject<'py>;
++        T: FromPyObjectOwned<'py>;
+ 
+     fn get_as_req<T>(&self, key: &Bound<'py, PyString>) -> PyResult<T>
+     where
+-        T: FromPyObject<'py>;
++        T: FromPyObjectOwned<'py>;
+ }
+ 
+ impl<'py> SchemaDict<'py> for Bound<'py, PyDict> {
+     fn get_as<T>(&self, key: &Bound<'py, PyString>) -> PyResult<Option<T>>
+     where
+-        T: FromPyObject<'py>,
++        T: FromPyObjectOwned<'py>,
+     {
+         match self.get_item(key)? {
+-            Some(t) => t.extract().map(Some),
++            Some(t) => t.extract().map(Some).map_err(Into::into),
+             None => Ok(None),
+         }
+     }
+ 
+     fn get_as_req<T>(&self, key: &Bound<'py, PyString>) -> PyResult<T>
+     where
+-        T: FromPyObject<'py>,
++        T: FromPyObjectOwned<'py>,
+     {
+         match self.get_item(key)? {
+-            Some(t) => t.extract(),
++            Some(t) => t.extract().map_err(Into::into),
+             None => py_err!(PyKeyError; "{}", key),
+         }
+     }
+@@ -46,7 +43,7 @@ impl<'py> SchemaDict<'py> for Bound<'py, PyDict> {
+ impl<'py> SchemaDict<'py> for Option<&Bound<'py, PyDict>> {
+     fn get_as<T>(&self, key: &Bound<'py, PyString>) -> PyResult<Option<T>>
+     where
+-        T: FromPyObject<'py>,
++        T: FromPyObjectOwned<'py>,
+     {
+         match self {
+             Some(d) => d.get_as(key),
+@@ -57,7 +54,7 @@ impl<'py> SchemaDict<'py> for Option<&Bound<'py, PyDict>> {
+     #[cfg_attr(has_coverage_attribute, coverage(off))]
+     fn get_as_req<T>(&self, key: &Bound<'py, PyString>) -> PyResult<T>
+     where
+-        T: FromPyObject<'py>,
++        T: FromPyObjectOwned<'py>,
+     {
+         match self {
+             Some(d) => d.get_as_req(key),
+@@ -133,12 +130,6 @@ pub fn extract_i64(v: &Bound<'_, PyAny>) -> Option<i64> {
+     v.extract().ok()
+ }
+ 
+-pub fn extract_int(v: &Bound<'_, PyAny>) -> Option<Int> {
+-    extract_i64(v)
+-        .map(Int::I64)
+-        .or_else(|| v.extract::<BigInt>().ok().map(Int::Big))
+-}
+-
+ pub(crate) fn new_py_string<'py>(py: Python<'py>, s: &str, cache_str: StringCacheMode) -> Bound<'py, PyString> {
+     // we could use `bytecount::num_chars(s.as_bytes()) == s.len()` as orjson does, but it doesn't appear to be faster
+     if matches!(cache_str, StringCacheMode::All) {
+diff --git a/src/url.rs b/src/url.rs
+index 6963e65..c6816f8 100644
+--- a/src/url.rs
++++ b/src/url.rs
+@@ -103,7 +103,7 @@ impl PyUrl {
+                 };
+                 ValidationError::from_val_error(py, name, InputType::Python, e, None, false, false)
+             })?
+-            .downcast_bound::<Self>(py)?
++            .cast_bound::<Self>(py)?
+             .get()
+             .clone(); // FIXME: avoid the clone, would need to make `validate` be aware of what URL subclass to create
+         Ok(url_obj)
+@@ -332,7 +332,7 @@ impl PyMultiHostUrl {
+                 };
+                 ValidationError::from_val_error(py, name, InputType::Python, e, None, false, false)
+             })?
+-            .downcast_bound::<Self>(py)?
++            .cast_bound::<Self>(py)?
+             .get()
+             .clone(); // FIXME: avoid the clone, would need to make `validate` be aware of what URL subclass to create
+         Ok(url_obj)
+@@ -602,10 +602,11 @@ impl UrlHostParts {
+     }
+ }
+ 
+-impl FromPyObject<'_> for UrlHostParts {
+-    fn extract_bound(ob: &Bound<'_, PyAny>) -> PyResult<Self> {
++impl FromPyObject<'_, '_> for UrlHostParts {
++    type Error = PyErr;
++    fn extract(ob: Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
+         let py = ob.py();
+-        let dict = ob.downcast::<PyDict>()?;
++        let dict = ob.cast::<PyDict>()?;
+         Ok(UrlHostParts {
+             username: dict.get_as(intern!(py, "username"))?,
+             password: dict.get_as(intern!(py, "password"))?,
+diff --git a/src/validators/arguments.rs b/src/validators/arguments.rs
+index ad13e6a..6481f21 100644
+--- a/src/validators/arguments.rs
++++ b/src/validators/arguments.rs
+@@ -80,7 +80,7 @@ impl BuildValidator for ArgumentsValidator {
+         let mut had_keyword_only = false;
+ 
+         for (arg_index, arg) in arguments_schema.iter().enumerate() {
+-            let arg = arg.downcast::<PyDict>()?;
++            let arg = arg.cast::<PyDict>()?;
+ 
+             let py_name: Bound<PyString> = arg.get_as_req(intern!(py, "name"))?;
+             let name = py_name.to_string();
+@@ -385,7 +385,7 @@ impl Validator for ArgumentsValidator {
+                 .validate(py, remaining_kwargs.as_any(), state)
+             {
+                 Ok(value) => {
+-                    output_kwargs.update(value.downcast_bound::<PyDict>(py).unwrap().as_mapping())?;
++                    output_kwargs.update(value.cast_bound::<PyDict>(py).unwrap().as_mapping())?;
+                 }
+                 Err(ValError::LineErrors(line_errors)) => {
+                     errors.extend(line_errors);
+diff --git a/src/validators/arguments_v3.rs b/src/validators/arguments_v3.rs
+index 8e57810..d7d8bbe 100644
+--- a/src/validators/arguments_v3.rs
++++ b/src/validators/arguments_v3.rs
+@@ -97,7 +97,7 @@ impl BuildValidator for ArgumentsV3Validator {
+         let mut names: AHashSet<String> = AHashSet::with_capacity(arguments_schema.len());
+ 
+         for arg in arguments_schema.iter() {
+-            let arg = arg.downcast::<PyDict>()?;
++            let arg = arg.cast::<PyDict>()?;
+ 
+             let py_name: Bound<PyString> = arg.get_as_req(intern!(py, "name"))?;
+             let name = py_name.to_string();
+@@ -370,7 +370,7 @@ impl ArgumentsV3Validator {
+                     ParameterMode::VarKwargsUnpackedTypedDict => {
+                         match parameter.validator.validate(py, dict_value.borrow_input(), state) {
+                             Ok(value) => {
+-                                output_kwargs.update(value.downcast_bound::<PyDict>(py).unwrap().as_mapping())?;
++                                output_kwargs.update(value.cast_bound::<PyDict>(py).unwrap().as_mapping())?;
+                             }
+                             Err(ValError::LineErrors(line_errors)) => {
+                                 errors.extend(
+@@ -421,7 +421,7 @@ impl ArgumentsV3Validator {
+                     ParameterMode::VarKwargsUnpackedTypedDict => {
+                         match parameter.validator.validate(py, PyDict::new(py).borrow_input(), state) {
+                             Ok(value) => {
+-                                output_kwargs.update(value.downcast_bound::<PyDict>(py).unwrap().as_mapping())?;
++                                output_kwargs.update(value.cast_bound::<PyDict>(py).unwrap().as_mapping())?;
+                             }
+                             Err(ValError::LineErrors(line_errors)) => {
+                                 errors.extend(
+@@ -742,7 +742,7 @@ impl ArgumentsV3Validator {
+                 .validate(py, remaining_kwargs.as_any(), state)
+             {
+                 Ok(value) => {
+-                    output_kwargs.update(value.downcast_bound::<PyDict>(py).unwrap().as_mapping())?;
++                    output_kwargs.update(value.cast_bound::<PyDict>(py).unwrap().as_mapping())?;
+                 }
+                 Err(ValError::LineErrors(line_errors)) => {
+                     errors.extend(line_errors);
+diff --git a/src/validators/call.rs b/src/validators/call.rs
+index 48509a9..4b8d2b1 100644
+--- a/src/validators/call.rs
++++ b/src/validators/call.rs
+@@ -87,7 +87,7 @@ impl Validator for CallValidator {
+ 
+         let return_value = if let Ok((args, kwargs)) = args.extract::<(Bound<PyTuple>, Bound<PyDict>)>() {
+             self.function.call(py, args, Some(&kwargs))?
+-        } else if let Ok(kwargs) = args.downcast::<PyDict>() {
++        } else if let Ok(kwargs) = args.cast::<PyDict>() {
+             self.function.call(py, (), Some(kwargs))?
+         } else {
+             let msg = "Arguments validator should return a tuple of (args, kwargs) or a dict of kwargs";
+diff --git a/src/validators/complex.rs b/src/validators/complex.rs
+index 2e6cc3c..b39b2a1 100644
+--- a/src/validators/complex.rs
++++ b/src/validators/complex.rs
+@@ -79,6 +79,6 @@ pub(crate) fn string_to_complex<'py>(
+                 ValError::InternalErr(err)
+             }
+         })?
+-        .downcast::<PyComplex>()?
++        .cast::<PyComplex>()?
+         .to_owned())
+ }
+diff --git a/src/validators/dataclass.rs b/src/validators/dataclass.rs
+index 9379b2f..9b75637 100644
+--- a/src/validators/dataclass.rs
++++ b/src/validators/dataclass.rs
+@@ -72,7 +72,7 @@ impl BuildValidator for DataclassArgsValidator {
+         let mut positional_count = 0;
+ 
+         for field in fields_schema {
+-            let field = field.downcast::<PyDict>()?;
++            let field = field.cast::<PyDict>()?;
+ 
+             let name_py: Bound<'_, PyString> = field.get_as_req(intern!(py, "name"))?;
+             let name: String = name_py.extract()?;
+@@ -386,7 +386,7 @@ impl Validator for DataclassArgsValidator {
+         field_value: &Bound<'py, PyAny>,
+         state: &mut ValidationState<'_, 'py>,
+     ) -> ValResult<Py<PyAny>> {
+-        let dict = obj.downcast::<PyDict>()?;
++        let dict = obj.cast::<PyDict>()?;
+         let extra_behavior = state.extra_behavior_or(self.extra_behavior);
+ 
+         let ok = |output: Py<PyAny>| {
+@@ -666,7 +666,7 @@ impl DataclassValidator {
+     ) -> ValResult<()> {
+         let (dc_dict, post_init_kwargs): (Bound<'_, PyAny>, Bound<'_, PyAny>) = val_output.extract(py)?;
+         if self.slots {
+-            let dc_dict = dc_dict.downcast::<PyDict>()?;
++            let dc_dict = dc_dict.cast::<PyDict>()?;
+             for (key, value) in dc_dict.iter() {
+                 force_setattr(py, dc, key, value)?;
+             }
+@@ -679,7 +679,7 @@ impl DataclassValidator {
+             let r = if PyAnyMethods::is_none(&post_init_kwargs) {
+                 dc.call_method0(post_init)
+             } else {
+-                let args = post_init_kwargs.downcast::<PyTuple>()?;
++                let args = post_init_kwargs.cast::<PyTuple>()?;
+                 dc.call_method1(post_init, args)
+             };
+             r.map_err(|e| convert_err(py, e, input))?;
+diff --git a/src/validators/datetime.rs b/src/validators/datetime.rs
+index 4c6810d..8761350 100644
+--- a/src/validators/datetime.rs
++++ b/src/validators/datetime.rs
+@@ -305,7 +305,7 @@ impl TZConstraint {
+         let Some(tz_constraint) = schema.get_item(intern!(py, "tz_constraint"))? else {
+             return Ok(None);
+         };
+-        if let Ok(s) = tz_constraint.downcast::<PyString>() {
++        if let Ok(s) = tz_constraint.cast::<PyString>() {
+             let s = s.to_str()?;
+             Ok(Some(Self::from_str(s)?))
+         } else {
+diff --git a/src/validators/is_instance.rs b/src/validators/is_instance.rs
+index 62d995b..30bcf8b 100644
+--- a/src/validators/is_instance.rs
++++ b/src/validators/is_instance.rs
+@@ -86,7 +86,7 @@ impl Validator for IsInstanceValidator {
+ pub fn class_repr(schema: &Bound<'_, PyDict>, class: &Bound<'_, PyAny>) -> PyResult<String> {
+     match schema.get_as(intern!(schema.py(), "cls_repr"))? {
+         Some(s) => Ok(s),
+-        None => match class.downcast::<PyType>() {
++        None => match class.cast::<PyType>() {
+             Ok(t) => Ok(t.qualname()?.to_string()),
+             Err(_) => Ok(class.repr()?.extract()?),
+         },
+diff --git a/src/validators/is_subclass.rs b/src/validators/is_subclass.rs
+index 6e6b859..acee58d 100644
+--- a/src/validators/is_subclass.rs
++++ b/src/validators/is_subclass.rs
+@@ -61,7 +61,7 @@ impl Validator for IsSubclassValidator {
+                 input,
+             ));
+         };
+-        match obj.downcast::<PyType>() {
++        match obj.cast::<PyType>() {
+             Ok(py_type) if py_type.is_subclass(self.class.bind(py))? => Ok(obj.clone().unbind()),
+             _ => Err(ValError::new(
+                 ErrorType::IsSubclassOf {
+diff --git a/src/validators/mod.rs b/src/validators/mod.rs
+index 6a4ef13..980fd63 100644
+--- a/src/validators/mod.rs
++++ b/src/validators/mod.rs
+@@ -554,7 +554,7 @@ fn build_validator_inner(
+     definitions: &mut DefinitionsBuilder<Arc<CombinedValidator>>,
+     use_prebuilt: bool,
+ ) -> PyResult<Arc<CombinedValidator>> {
+-    let dict = schema.downcast::<PyDict>()?;
++    let dict = schema.cast::<PyDict>()?;
+     let py = schema.py();
+     let type_: Bound<'_, PyString> = dict.get_as_req(intern!(py, "type"))?;
+     let type_ = type_.to_str()?;
+diff --git a/src/validators/model.rs b/src/validators/model.rs
+index aeaa342..c0409bf 100644
+--- a/src/validators/model.rs
++++ b/src/validators/model.rs
+@@ -165,8 +165,8 @@ impl Validator for ModelValidator {
+                     let inner_input = if PyAnyMethods::is_none(&model_extra) {
+                         dict
+                     } else {
+-                        let full_model_dict = dict.downcast::<PyDict>()?.copy()?;
+-                        full_model_dict.update(model_extra.downcast()?)?;
++                        let full_model_dict = dict.cast::<PyDict>()?.copy()?;
++                        full_model_dict.update(model_extra.cast()?)?;
+                         full_model_dict.into_any()
+                     };
+                     self.validate_construct(py, &inner_input, Some(&fields_set), state)
+@@ -209,10 +209,10 @@ impl Validator for ModelValidator {
+                 Ok(model.into_py_any(py)?)
+             };
+         }
+-        let old_dict = model.getattr(intern!(py, DUNDER_DICT))?.downcast_into::<PyDict>()?;
++        let old_dict = model.getattr(intern!(py, DUNDER_DICT))?.cast_into::<PyDict>()?;
+ 
+         let input_dict = old_dict.copy()?;
+-        if let Ok(old_extra) = model.getattr(intern!(py, DUNDER_MODEL_EXTRA_KEY))?.downcast::<PyDict>() {
++        if let Ok(old_extra) = model.getattr(intern!(py, DUNDER_MODEL_EXTRA_KEY))?.cast::<PyDict>() {
+             input_dict.update(old_extra.as_mapping())?;
+         }
+         input_dict.set_item(field_name, field_value)?;
+@@ -228,7 +228,7 @@ impl Validator for ModelValidator {
+         ) = output.extract(py)?;
+ 
+         if let Ok(fields_set) = model.getattr(intern!(py, DUNDER_FIELDS_SET_KEY)) {
+-            let fields_set = fields_set.downcast::<PySet>()?;
++            let fields_set = fields_set.cast::<PySet>()?;
+             for field_name in validated_fields_set {
+                 fields_set.add(field_name)?;
+             }
+diff --git a/src/validators/model_fields.rs b/src/validators/model_fields.rs
+index 7174427..ad7e16e 100644
+--- a/src/validators/model_fields.rs
++++ b/src/validators/model_fields.rs
+@@ -78,7 +78,7 @@ impl BuildValidator for ModelFieldsValidator {
+         let mut fields: Vec<Field> = Vec::with_capacity(fields_dict.len());
+ 
+         for (key, value) in fields_dict {
+-            let field_info = value.downcast::<PyDict>()?;
++            let field_info = value.cast::<PyDict>()?;
+             let field_name_py: Bound<'_, PyString> = key.extract()?;
+             let field_name = field_name_py.to_str()?;
+ 
+@@ -319,7 +319,7 @@ impl Validator for ModelFieldsValidator {
+                                 let py_key = match self.extras_keys_validator {
+                                     Some(validator) => {
+                                         match validator.validate(self.py, raw_key.borrow_input(), self.state) {
+-                                            Ok(value) => value.downcast_bound::<PyString>(self.py)?.clone(),
++                                            Ok(value) => value.cast_bound::<PyString>(self.py)?.clone(),
+                                             Err(ValError::LineErrors(line_errors)) => {
+                                                 for err in line_errors {
+                                                     self.errors.push(err.with_outer_location(raw_key.clone()));
+@@ -396,7 +396,7 @@ impl Validator for ModelFieldsValidator {
+         field_value: &Bound<'py, PyAny>,
+         state: &mut ValidationState<'_, 'py>,
+     ) -> ValResult<Py<PyAny>> {
+-        let dict = obj.downcast::<PyDict>()?;
++        let dict = obj.cast::<PyDict>()?;
+         let extra_behavior = state.extra_behavior_or(self.extra_behavior);
+ 
+         let get_updated_dict = |output: &Bound<'py, PyAny>| {
+diff --git a/src/validators/typed_dict.rs b/src/validators/typed_dict.rs
+index 26af98f..b66cea4 100644
+--- a/src/validators/typed_dict.rs
++++ b/src/validators/typed_dict.rs
+@@ -81,8 +81,8 @@ impl BuildValidator for TypedDictValidator {
+         };
+ 
+         for (key, value) in fields_dict {
+-            let field_info = value.downcast::<PyDict>()?;
+-            let field_name_py = key.downcast_into::<PyString>()?;
++            let field_info = value.cast::<PyDict>()?;
++            let field_name_py = key.cast_into::<PyString>()?;
+             let field_name = field_name_py.to_str()?;
+ 
+             let schema = field_info.get_as_req(intern!(py, "schema"))?;
+diff --git a/src/validators/union.rs b/src/validators/union.rs
+index 3b88bbc..e4b0740 100644
+--- a/src/validators/union.rs
++++ b/src/validators/union.rs
+@@ -61,7 +61,7 @@ impl BuildValidator for UnionValidator {
+             .iter()
+             .map(|choice| {
+                 let mut label: Option<String> = None;
+-                let choice = match choice.downcast::<PyTuple>() {
++                let choice = match choice.cast::<PyTuple>() {
+                     Ok(py_tuple) => {
+                         let choice = py_tuple.get_item(0)?;
+                         label = Some(py_tuple.get_item(1)?.to_string());
+diff --git a/src/validators/uuid.rs b/src/validators/uuid.rs
+index 25b80c5..62b32b9 100644
+--- a/src/validators/uuid.rs
++++ b/src/validators/uuid.rs
+@@ -27,14 +27,8 @@ const UUID_IS_SAFE: &str = "is_safe";
+ 
+ static UUID_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+ 
+-fn import_type(py: Python, module: &str, attr: &str) -> PyResult<Py<PyType>> {
+-    py.import(module)?.getattr(attr)?.extract()
+-}
+-
+ fn get_uuid_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+-    Ok(UUID_TYPE
+-        .get_or_init(py, || import_type(py, "uuid", "UUID").unwrap())
+-        .bind(py))
++    UUID_TYPE.import(py, "uuid", "UUID")
+ }
+ 
+ #[derive(Debug, Clone, Copy)]
+diff --git a/tests/test.rs b/tests/test.rs
+index 8a3f1d5..38edc91 100644
+--- a/tests/test.rs
++++ b/tests/test.rs
+@@ -133,7 +133,7 @@ dump_json_input_2 = {'a': 'something'}
+                 .get_item("schema")
+                 .unwrap()
+                 .unwrap()
+-                .downcast_into::<PyDict>()
++                .cast_into::<PyDict>()
+                 .unwrap();
+             let dump_json_input_1 = locals.get_item("dump_json_input_1").unwrap().unwrap();
+             let dump_json_input_2 = locals.get_item("dump_json_input_2").unwrap().unwrap();
+diff --git a/tests/test_errors.py b/tests/test_errors.py
+index 249f18e..4e1dfe2 100644
+--- a/tests/test_errors.py
++++ b/tests/test_errors.py
+@@ -94,10 +94,10 @@ def test_pydantic_value_error_invalid_dict():
+ 
+     assert str(exc_info.value) == (
+         '1 validation error for function-plain[my_function()]\n'
+-        "  (error rendering message: TypeError: 'tuple' object cannot be converted to 'PyString') "
++        "  (error rendering message: TypeError: 'tuple' object cannot be cast as 'str') "
+         '[type=my_error, input_value=42, input_type=int]'
+     )
+-    with pytest.raises(TypeError, match="'tuple' object cannot be converted to 'PyString'"):
++    with pytest.raises(TypeError, match="'tuple' object cannot be cast as 'str'"):
+         exc_info.value.errors(include_url=False)
+ 
+ 
+@@ -107,7 +107,7 @@ def test_pydantic_value_error_invalid_type():
+ 
+     v = SchemaValidator(core_schema.with_info_plain_validator_function(f))
+ 
+-    with pytest.raises(TypeError, match="argument 'context': 'list' object cannot be converted to 'PyDict'"):
++    with pytest.raises(TypeError, match="argument 'context': 'list' object cannot be cast as 'dict'"):
+         v.validate_python(42)
+ 
+ 
+diff --git a/tests/validators/test_is_subclass.py b/tests/validators/test_is_subclass.py
+index 43e65b6..4f8188b 100644
+--- a/tests/validators/test_is_subclass.py
++++ b/tests/validators/test_is_subclass.py
+@@ -58,7 +58,7 @@ def test_not_parent():
+ 
+ 
+ def test_invalid_type():
+-    with pytest.raises(SchemaError, match="TypeError: 'Foo' object cannot be converted to 'PyType"):
++    with pytest.raises(SchemaError, match="TypeError: 'Foo' object cannot be cast as 'type"):
+         SchemaValidator(core_schema.is_subclass_schema(Foo()))
+ 
+ 
+diff --git a/tests/validators/test_model.py b/tests/validators/test_model.py
+index 5cd7634..b3e4d98 100644
+--- a/tests/validators/test_model.py
++++ b/tests/validators/test_model.py
+@@ -476,7 +476,7 @@ def test_model_class_function_after():
+ 
+ 
+ def test_model_class_not_type():
+-    with pytest.raises(SchemaError, match=re.escape("TypeError: 'int' object cannot be converted to 'PyType'")):
++    with pytest.raises(SchemaError, match=re.escape("TypeError: 'int' object cannot be cast as 'type'")):
+         SchemaValidator(
+             schema=core_schema.model_schema(
+                 cls=123,
+diff --git a/tests/validators/test_model_fields.py b/tests/validators/test_model_fields.py
+index fc80feb..f221bce 100644
+--- a/tests/validators/test_model_fields.py
++++ b/tests/validators/test_model_fields.py
+@@ -743,7 +743,7 @@ def test_paths_allow_by_name(py_and_json: PyAndJson, input_value):
+     [
+         ({'validation_alias': []}, 'Lookup paths should have at least one element'),
+         ({'validation_alias': [[]]}, 'Each alias path should have at least one element'),
+-        ({'validation_alias': [123]}, "TypeError: 'int' object cannot be converted to 'PyList'"),
++        ({'validation_alias': [123]}, "TypeError: 'int' object cannot be cast as 'list'"),
+         ({'validation_alias': [[1, 'foo']]}, 'TypeError: The first item in an alias path should be a string'),
+     ],
+     ids=repr,
+diff --git a/tests/validators/test_string.py b/tests/validators/test_string.py
+index 0ea5c23..4b52445 100644
+--- a/tests/validators/test_string.py
++++ b/tests/validators/test_string.py
+@@ -181,7 +181,7 @@ def test_invalid_regex(engine):
+     # with pytest.raises(SchemaError) as exc_info:
+     #     SchemaValidator({'type': 'str', 'pattern': 123})
+     # assert exc_info.value.args[0] == (
+-    #     'Error building "str" validator:\n  TypeError: \'int\' object cannot be converted to \'PyString\''
++    #     'Error building "str" validator:\n  TypeError: \'int\' object cannot be cast as \'str\''
+     # )
+     with pytest.raises(SchemaError) as exc_info:
+         SchemaValidator(core_schema.str_schema(pattern='(abc', regex_engine=engine))
+diff --git a/tests/validators/test_typed_dict.py b/tests/validators/test_typed_dict.py
+index 88c05c6..d962815 100644
+--- a/tests/validators/test_typed_dict.py
++++ b/tests/validators/test_typed_dict.py
+@@ -629,7 +629,7 @@ def test_paths_allow_by_name(py_and_json: PyAndJson, input_value):
+     [
+         ({'validation_alias': []}, 'Lookup paths should have at least one element'),
+         ({'validation_alias': [[]]}, 'Each alias path should have at least one element'),
+-        ({'validation_alias': [123]}, "TypeError: 'int' object cannot be converted to 'PyList'"),
++        ({'validation_alias': [123]}, "TypeError: 'int' object cannot be cast as 'list'"),
+         ({'validation_alias': [[1, 'foo']]}, 'TypeError: The first item in an alias path should be a string'),
+     ],
+     ids=repr,
