@@ -3,7 +3,7 @@
 @@ -28,22 +28,22 @@
  # TODO it would be very nice to remove the "py-clone" feature as it can panic,
  # but needs a bit of work to make sure it's not used in the codebase
- pyo3 = { version = "0.26", features = ["num-bigint", "py-clone"] }
+ pyo3 = { version = "0.27", features = ["num-bigint", "py-clone"] }
 -regex = "1.12.2"
 +regex = "1.11.1"
  strum = { version = "0.26", features = ["derive"] }
@@ -27,6 +27,6 @@
  num-traits = "0.2.19"
 -uuid = "1.18.1"
 +uuid = "1.10.0"
- jiter = { version = "0.11.1", features = ["python"] }
+ jiter = { version = "0.12.0", features = ["python"] }
  hex = "0.4.3"
  percent-encoding = "2.3.1"

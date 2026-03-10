@@ -1,5 +1,5 @@
 relax-deps.patch
 drop-pyo3-generate-import-lib.patch
-#pyo3-0.27.patch
+pyo3-0.27.patch
 pexip-downgrade-deps.patch
 pexip-pytest-run-parallel.patch
