@@ -1,0 +1,139 @@
+From: Colin Watson <cjwatson@debian.org>
+Date: Tue, 17 Mar 2026 10:49:24 +0000
+Subject: Accept pyo3 0.28
+
+Test fixes loosely inspired by
+https://github.com/pydantic/pydantic/commit/c42224acb31dd9f374124a74809332246e595194,
+and can be dropped once we upgrade past that.
+
+Last-Update: 2026-03-17
+---
+ Cargo.toml                            |  6 +++---
+ tests/test_errors.py                  | 23 ++++++++++++++++-------
+ tests/validators/test_is_subclass.py  |  2 +-
+ tests/validators/test_model.py        |  2 +-
+ tests/validators/test_model_fields.py |  2 +-
+ tests/validators/test_typed_dict.py   |  2 +-
+ 6 files changed, 23 insertions(+), 14 deletions(-)
+
+diff --git a/Cargo.toml b/Cargo.toml
+index b726b6e..ebc449a 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -27,7 +27,7 @@ rust-version = "1.75"
+ [dependencies]
+ # TODO it would be very nice to remove the "py-clone" feature as it can panic,
+ # but needs a bit of work to make sure it's not used in the codebase
+-pyo3 = { version = "0.27", features = ["num-bigint", "py-clone"] }
++pyo3 = { version = ">=0.27,<0.29", features = ["num-bigint", "py-clone"] }
+ regex = "1.12.2"
+ strum = { version = "0.26", features = ["derive"] }
+ strum_macros = "0.26"
+@@ -69,12 +69,12 @@ debug = true
+ strip = false
+ 
+ [dev-dependencies]
+-pyo3 = { version = "0.27", features = ["auto-initialize"] }
++pyo3 = { version = ">=0.27,<0.29", features = ["auto-initialize"] }
+ 
+ [build-dependencies]
+ version_check = "0.9.5"
+ # used where logic has to be version/distribution specific, e.g. pypy
+-pyo3-build-config = { version = "0.27" }
++pyo3-build-config = { version = ">=0.27,<0.29" }
+ 
+ [lints.clippy]
+ dbg_macro = "warn"
+diff --git a/tests/test_errors.py b/tests/test_errors.py
+index 4e1dfe2..79660ee 100644
+--- a/tests/test_errors.py
++++ b/tests/test_errors.py
+@@ -92,12 +92,19 @@ def test_pydantic_value_error_invalid_dict():
+     with pytest.raises(ValidationError) as exc_info:
+         v.validate_python(42)
+ 
+-    assert str(exc_info.value) == (
+-        '1 validation error for function-plain[my_function()]\n'
+-        "  (error rendering message: TypeError: 'tuple' object cannot be cast as 'str') "
+-        '[type=my_error, input_value=42, input_type=int]'
+-    )
+-    with pytest.raises(TypeError, match="'tuple' object cannot be cast as 'str'"):
++    assert str(exc_info.value) in {
++        (
++            '1 validation error for function-plain[my_function()]\n'
++            "  (error rendering message: TypeError: 'tuple' object cannot be cast as 'str') "
++            '[type=my_error, input_value=42, input_type=int]'
++        ),
++        (
++            '1 validation error for function-plain[my_function()]\n'
++            "  (error rendering message: TypeError: 'tuple' object is not an instance of 'str') "
++            '[type=my_error, input_value=42, input_type=int]'
++        ),
++    }
++    with pytest.raises(TypeError, match=r"'tuple' object (cannot be cast as|is not an instance of) 'str'"):
+         exc_info.value.errors(include_url=False)
+ 
+ 
+@@ -107,7 +114,9 @@ def test_pydantic_value_error_invalid_type():
+ 
+     v = SchemaValidator(core_schema.with_info_plain_validator_function(f))
+ 
+-    with pytest.raises(TypeError, match="argument 'context': 'list' object cannot be cast as 'dict'"):
++    with pytest.raises(
++        TypeError, match=r"argument 'context': 'list' object (cannot be cast as|is not an instance of) 'dict'"
++    ):
+         v.validate_python(42)
+ 
+ 
+diff --git a/tests/validators/test_is_subclass.py b/tests/validators/test_is_subclass.py
+index 4f8188b..c705381 100644
+--- a/tests/validators/test_is_subclass.py
++++ b/tests/validators/test_is_subclass.py
+@@ -58,7 +58,7 @@ def test_not_parent():
+ 
+ 
+ def test_invalid_type():
+-    with pytest.raises(SchemaError, match="TypeError: 'Foo' object cannot be cast as 'type"):
++    with pytest.raises(SchemaError, match=r"TypeError: 'Foo' object (cannot be cast as|is not an instance of) 'type"):
+         SchemaValidator(core_schema.is_subclass_schema(Foo()))
+ 
+ 
+diff --git a/tests/validators/test_model.py b/tests/validators/test_model.py
+index b3e4d98..e39a2c0 100644
+--- a/tests/validators/test_model.py
++++ b/tests/validators/test_model.py
+@@ -476,7 +476,7 @@ def test_model_class_function_after():
+ 
+ 
+ def test_model_class_not_type():
+-    with pytest.raises(SchemaError, match=re.escape("TypeError: 'int' object cannot be cast as 'type'")):
++    with pytest.raises(SchemaError, match=r"TypeError: 'int' object (cannot be cast as|is not an instance of) 'type'"):
+         SchemaValidator(
+             schema=core_schema.model_schema(
+                 cls=123,
+diff --git a/tests/validators/test_model_fields.py b/tests/validators/test_model_fields.py
+index f221bce..ea8ed11 100644
+--- a/tests/validators/test_model_fields.py
++++ b/tests/validators/test_model_fields.py
+@@ -743,7 +743,7 @@ def test_paths_allow_by_name(py_and_json: PyAndJson, input_value):
+     [
+         ({'validation_alias': []}, 'Lookup paths should have at least one element'),
+         ({'validation_alias': [[]]}, 'Each alias path should have at least one element'),
+-        ({'validation_alias': [123]}, "TypeError: 'int' object cannot be cast as 'list'"),
++        ({'validation_alias': [123]}, r"TypeError: 'int' object (cannot be cast as|is not an instance of) 'list'"),
+         ({'validation_alias': [[1, 'foo']]}, 'TypeError: The first item in an alias path should be a string'),
+     ],
+     ids=repr,
+diff --git a/tests/validators/test_typed_dict.py b/tests/validators/test_typed_dict.py
+index d962815..e1d2796 100644
+--- a/tests/validators/test_typed_dict.py
++++ b/tests/validators/test_typed_dict.py
+@@ -629,7 +629,7 @@ def test_paths_allow_by_name(py_and_json: PyAndJson, input_value):
+     [
+         ({'validation_alias': []}, 'Lookup paths should have at least one element'),
+         ({'validation_alias': [[]]}, 'Each alias path should have at least one element'),
+-        ({'validation_alias': [123]}, "TypeError: 'int' object cannot be cast as 'list'"),
++        ({'validation_alias': [123]}, r"TypeError: 'int' object (cannot be cast as|is not an instance of) 'list'"),
+         ({'validation_alias': [[1, 'foo']]}, 'TypeError: The first item in an alias path should be a string'),
+     ],
+     ids=repr,

@@ -1,3 +1,9 @@
+pydantic-core (2.41.5-3) unstable; urgency=medium
+
+  * Accept pyo3 0.28.
+
+ -- Colin Watson <cjwatson@debian.org>  Tue, 17 Mar 2026 11:20:04 +0000
+
 pydantic-core (2.41.5-2) unstable; urgency=medium
 
   [ Peter Michael Green ]
