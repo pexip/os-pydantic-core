@@ -1,3 +1,5 @@
+Downgrade rust dependencies to match those in trixie.
+
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -28,22 +28,22 @@
